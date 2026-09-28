@@ -1,0 +1,8 @@
+.git
+.github
+.githooks
+target
+output
+cookies.txt
+*.log
+.DS_Store

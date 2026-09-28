@@ -1,0 +1,9 @@
+target/
+
+# tool output
+output/
+
+# never commit session cookies
+cookies.txt
+
+.DS_Store

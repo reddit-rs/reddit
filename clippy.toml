@@ -1,0 +1,3 @@
+# Clippy configuration — the MSRV is taken from Cargo.toml (`rust-version`).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

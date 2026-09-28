@@ -1,0 +1,31 @@
+[package]
+name = "reddit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Reddit offline viewer: save a subreddit's posts, images and galleries as JSON + media"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/reddit-rs/reddit"
+homepage = "https://github.com/reddit-rs/reddit"
+documentation = "https://docs.rs/reddit"
+keywords = ["reddit", "viewer", "offline", "archive", "media"]
+categories = ["command-line-utilities", "web-programming::http-client"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time"] }
+wreq = { version = "6.0.0-rc", features = ["query", "json"] }
+wreq-util = "3.0.0-rc"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
+anyhow = "1"
+regex = "1"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+
+[profile.release]
+lto = true
