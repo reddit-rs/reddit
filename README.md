@@ -1,5 +1,7 @@
 # reddit
 
+<img src="https://raw.githubusercontent.com/reddit-rs/reddit/main/screenshot.png" alt="The reddit offline viewer browsing an archived r/funny listing — subreddit header with icon and member count, and a grid of saved post images with titles.">
+
 > **Disclaimer:** This project is **not affiliated with, endorsed by, or connected to
 > Reddit, Inc.** It is an unofficial, independent offline viewer built on Reddit's
 > public JSON endpoints. All content belongs to its respective owners — use it only to
@@ -71,7 +73,7 @@ Videos, pagination depth and subreddit art are opt-in / configurable.
 --cookies STR|FILE   'k=v; k2=v2' or a Netscape cookies.txt path (recommended;
                       reddit rejects anonymous JSON requests; unlocks private/NSFW)
 --user-agent STRING  must match the browser the cookies were exported from
---out-dir DIR        output directory (default: output/<r_|u_><name>)
+--out-dir DIR        output directory (default: output/<r_|u_><name>; $REDDIT_OUT_DIR)
 --no-icon            skip the subreddit icon and banner
 --no-raw             skip the raw listing JSON dump
 --no-downloads       JSON only, no media
@@ -157,6 +159,9 @@ cargo install --path .
 
 ## Docker
 
+The image is built on `alpine:3.24` and ships the musl binary — about 8 MB
+compressed (~17 MB on disk):
+
 ```sh
 docker build -t reddit:local .
 docker run --rm \
@@ -165,8 +170,10 @@ docker run --rm \
   reddit:local funny --cookies /cookies.txt
 ```
 
-The container runs as a non-root user (uid 10001); if you hit a permission error
-on the mount, make the host directory writable: `chmod -R a+w output`.
+Archives land in `./output/r_funny/` (the image sets `REDDIT_OUT_DIR=/data`, and
+the same variable overrides `--out-dir` anywhere). The container runs as a
+non-root user (uid 10001); if you hit a permission error on the mount, make the
+host directory writable: `chmod -R a+w output`.
 
 ## Library usage
 

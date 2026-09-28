@@ -4,5 +4,6 @@
 target
 output
 cookies.txt
+screenshot.png
 *.log
 .DS_Store

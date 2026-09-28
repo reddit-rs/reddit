@@ -36,8 +36,13 @@ struct Cli {
     #[arg(long, default_value = UA_DEFAULT)]
     user_agent: String,
 
-    /// output directory (default: output/<r_|u_><name>)
-    #[arg(long, default_value = "output", value_name = "DIR")]
+    /// output directory (default: output/<r_|u_><name>, or $REDDIT_OUT_DIR)
+    #[arg(
+        long,
+        default_value = "output",
+        env = "REDDIT_OUT_DIR",
+        value_name = "DIR"
+    )]
     out_dir: PathBuf,
 
     /// paginate the listing; optional cap: --posts 50 (0 = everything)

@@ -1,24 +1,29 @@
 # syntax=docker/dockerfile:1
 
 # ---- builder: Alpine (musl) ----
-FROM rust:1.97-alpine AS builder
+FROM rust:1.98.1-alpine3.24 AS builder
 RUN apk add --no-cache build-base musl-dev cmake perl clang clang22-libclang git
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-# bindgen (used by btls-sys) dlopens libclang at build time, which fails in a
-# fully-static musl binary; link against musl/libgcc dynamically instead.
+# bindgen (btls-sys) dlopens libclang from build scripts, which needs a
+# dynamically linked musl host: with crt-static it fails with
+# "Dynamic loading not supported".
 ENV RUSTFLAGS="-C target-feature=-crt-static"
-RUN cargo build --release --locked \
-    && strip target/release/reddit
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --locked \
+    && cp target/release/reddit /usr/local/bin/reddit
 
-# ---- runtime: bare Alpine + musl-linked binary ----
+# ---- runtime: bare Alpine + the musl binary ----
 FROM alpine:3.24
 RUN apk add --no-cache ca-certificates-bundle libgcc libstdc++ \
     && addgroup -S -g 10001 rduser \
     && adduser -S -D -u 10001 -G rduser rduser
 WORKDIR /data
-COPY --from=builder /build/target/release/reddit /usr/local/bin/reddit
+# archives land directly in the mounted volume instead of /data/output
+ENV REDDIT_OUT_DIR=/data
+COPY --from=builder /usr/local/bin/reddit /usr/local/bin/reddit
 USER rduser
 VOLUME /data
 ENTRYPOINT ["reddit"]
