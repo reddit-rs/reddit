@@ -1,6 +1,6 @@
 # reddit
 
-<img src="https://raw.githubusercontent.com/reddit-rs/reddit/main/screenshot.png" alt="The reddit offline viewer browsing an archived r/funny listing — subreddit header with icon and member count, and a grid of saved post images with titles.">
+<img src="https://raw.githubusercontent.com/reddit-rs/reddit/refs/heads/main/screenshot.png" alt="The reddit offline viewer browsing an archived r/funny listing — subreddit header with icon and member count, and a grid of saved post images with titles.">
 
 > **Disclaimer:** This project is **not affiliated with, endorsed by, or connected to
 > Reddit, Inc.** It is an unofficial, independent offline viewer built on Reddit's
@@ -229,4 +229,13 @@ tests/
 
 ## License
 
-MIT
+Licensed under either of
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT license](LICENSE-MIT)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.
