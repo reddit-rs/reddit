@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{ArgAction, Parser, ValueEnum};
-use reddit::{Config, PostsMode, Sort, TimeFilter, UA_DEFAULT};
+use reddit::{Config, MediaFormat, PostsMode, Sort, TimeFilter, UA_DEFAULT};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -12,6 +12,9 @@ use std::path::PathBuf;
 listing (~25 posts) as JSON and downloads their images — galleries keep every image, \
 videos are skipped. Use --posts 0 to paginate the whole listing and --videos to grab \
 reddit-hosted video files.\n\n\
+Only some media containers can be kept: --formats gif downloads just the GIFs, \
+--formats jpg,jpeg keeps JPEG stills (jpg and jpeg are the same format). The listing \
+JSON still describes every post. Video formats imply --videos.\n\n\
 Several subreddits (or users) can be archived in one run; each gets its own directory \
 under the output root. Re-running a target is incremental: the fresh listing is merged \
 into the existing archive and media files already on disk are not downloaded again.\n\n\
@@ -22,6 +25,7 @@ subreddits, provided the account can view them.\n\n\
 Examples:\n  \
 reddit funny --cookies cookies.txt\n  \
 reddit funny rust --posts 0 --offline --cookies cookies.txt\n  \
+reddit gifs --formats gif --posts 0 --cookies cookies.txt\n  \
 reddit https://www.reddit.com/r/funny --sort new --posts 5 --cookies cookies.txt\n  \
 reddit u/spez --sort top --time year --gallery-images 10 --cookies cookies.txt"
 )]
@@ -64,6 +68,17 @@ struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     videos: bool,
 
+    /// only download these media formats (repeatable or comma-separated;
+    /// mp4/webm imply --videos)
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        ignore_case = true,
+        value_name = "FORMAT"
+    )]
+    formats: Vec<FormatArg>,
+
     /// max images per gallery (0 = all)
     #[arg(long, default_value_t = 0, value_name = "N")]
     gallery_images: usize,
@@ -87,6 +102,35 @@ struct Cli {
     /// generate self-contained index.html viewers (plus an archive hub)
     #[arg(long, action = ArgAction::SetTrue)]
     offline: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum FormatArg {
+    /// JPEG images (`jpeg` is accepted too)
+    #[value(alias = "jpeg")]
+    Jpg,
+    Png,
+    Gif,
+    Webp,
+    Bmp,
+    /// MP4 video (implies --videos)
+    Mp4,
+    /// WebM video (implies --videos)
+    Webm,
+}
+
+impl From<FormatArg> for MediaFormat {
+    fn from(f: FormatArg) -> Self {
+        match f {
+            FormatArg::Jpg => MediaFormat::Jpg,
+            FormatArg::Png => MediaFormat::Png,
+            FormatArg::Gif => MediaFormat::Gif,
+            FormatArg::Webp => MediaFormat::Webp,
+            FormatArg::Bmp => MediaFormat::Bmp,
+            FormatArg::Mp4 => MediaFormat::Mp4,
+            FormatArg::Webm => MediaFormat::Webm,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -150,6 +194,12 @@ async fn main() -> Result<()> {
         None => PostsMode::Snapshot,
     };
 
+    // `--formats jpeg` and `--formats jpg` are the same request.
+    let mut formats: Vec<MediaFormat> =
+        cli.formats.iter().copied().map(MediaFormat::from).collect();
+    formats.sort();
+    formats.dedup();
+
     let multiple = parsed.len() > 1;
     let mut summaries = Vec::with_capacity(parsed.len());
     let mut failures = Vec::new();
@@ -185,6 +235,7 @@ async fn main() -> Result<()> {
             sort,
             time,
             videos: cli.videos,
+            formats: formats.clone(),
             gallery_images: cli.gallery_images,
             since: cli.since.clone(),
             skip_icon: cli.no_icon,

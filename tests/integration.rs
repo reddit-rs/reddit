@@ -1,7 +1,7 @@
 //! End-to-end tests: the whole pipeline runs against a mocked reddit API and
 //! mocked media hosts (no network access required).
 
-use reddit::{Config, PostsMode, Sort, Target, clean, models::ManifestItem};
+use reddit::{Config, MediaFormat, PostsMode, Sort, Target, clean, models::ManifestItem};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
@@ -149,6 +149,63 @@ fn second_page(server_uri: &str) -> Value {
     })
 }
 
+/// A tiny subreddit with a GIF and a JPEG post, used by the format-filter
+/// tests. `broken_gif` adds a post whose GIF 404s (so only its JPEG preview
+/// responds), which a GIF-only run must not save.
+fn gifs_page(server_uri: &str, broken_gif: bool) -> Value {
+    let post = |id: &str, original: &str, preview: &str| {
+        json!({
+            "id": id,
+            "name": format!("t3_{id}"),
+            "title": format!("Post {id}"),
+            "author": "poster",
+            "subreddit": "gifs",
+            "permalink": format!("/r/gifs/comments/{id}/post/"),
+            "url": format!("{server_uri}{original}"),
+            "domain": "i.redd.it",
+            "post_hint": "image",
+            "created_utc": 1700200000.0,
+            "thumbnail": format!("{server_uri}/thumbs/{id}.jpg"),
+            "preview": {"images": [{"source": {
+                "url": format!("{server_uri}{preview}"),
+                "width": 200, "height": 200
+            }}]}
+        })
+    };
+    let mut children = vec![json!({
+        "kind": "t3",
+        "data": post("a1", "/i/animated.gif", "/prev/animated.jpg")
+    })];
+    if broken_gif {
+        children.push(json!({
+            "kind": "t3",
+            "data": post("b1", "/i/broken.gif", "/prev/broken.jpg")
+        }));
+    }
+    children.push(json!({
+        "kind": "t3",
+        "data": post("j1", "/i/still.jpg", "/prev/still.jpg")
+    }));
+    // reddit serves JPEG for `….png?format=pjpg` URLs; the stored file must be
+    // named .jpg and the format filter must see it as jpg
+    children.push(json!({
+        "kind": "t3",
+        "data": {
+            "id": "p1",
+            "name": "t3_p1",
+            "title": "Profiled still",
+            "author": "poster",
+            "subreddit": "gifs",
+            "permalink": "/r/gifs/comments/p1/profiled/",
+            "url": format!("{server_uri}/x/thumb.png?format=pjpg&auto=webp&s=1"),
+            "domain": "external-preview.redd.it",
+            "post_hint": "image",
+            "created_utc": 1700200000.0,
+        }
+    }));
+    json!({"kind": "Listing", "data": {"after": null, "children": children}})
+}
+
 async fn mount_api(server: &MockServer, uri: &str) {
     Mock::given(method("GET"))
         .and(path("/r/testsub/about.json"))
@@ -267,6 +324,59 @@ async fn mount_api(server: &MockServer, uri: &str) {
     }
 }
 
+/// Mounts `/r/gifs/*` plus the media endpoints used by the format filter tests.
+async fn mount_gifs_api(server: &MockServer, uri: &str, broken_gif: bool) {
+    Mock::given(method("GET"))
+        .and(path("/r/gifs/about.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "t5",
+            "data": {"display_name": "gifs", "title": "Gifs", "subscribers": 5, "over18": false}
+        })))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/r/gifs/hot.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(gifs_page(uri, broken_gif)))
+        .mount(server)
+        .await;
+
+    for (p, mime) in [
+        ("/i/animated.gif", "image/gif"),
+        ("/prev/animated.jpg", "image/jpeg"),
+        ("/i/still.jpg", "image/jpeg"),
+        ("/prev/still.jpg", "image/jpeg"),
+        ("/x/thumb.png", "image/jpeg"), // `?format=pjpg` is served as JPEG
+    ] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", mime)
+                    .set_body_bytes(format!("FAKE-{p}").into_bytes()),
+            )
+            .mount(server)
+            .await;
+    }
+
+    if broken_gif {
+        Mock::given(method("GET"))
+            .and(path("/i/broken.gif"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/prev/broken.jpg"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/jpeg")
+                    .set_body_bytes(b"FAKE-JPEG".to_vec()),
+            )
+            .mount(server)
+            .await;
+    }
+}
+
 fn base_cfg(server_uri: &str, outdir: &std::path::Path) -> Config {
     Config {
         target: Target::subreddit("testsub"),
@@ -277,6 +387,7 @@ fn base_cfg(server_uri: &str, outdir: &std::path::Path) -> Config {
         sort: Sort::Hot,
         time: reddit::TimeFilter::All,
         videos: false,
+        formats: Vec::new(),
         gallery_images: 0,
         since: None,
         skip_icon: false,
@@ -701,6 +812,120 @@ async fn offline_multi_target_writes_hub_and_backlinks() {
     let inner =
         std::fs::read_to_string(outdir(dir.path(), "r_testsub").join("index.html")).unwrap();
     assert!(inner.contains("\"hub\":true"));
+}
+
+#[tokio::test]
+async fn formats_filter_downloads_only_matching_media() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    mount_gifs_api(&server, &uri, false).await;
+    let dir = tempdir().unwrap();
+
+    let mut cfg = base_cfg(&uri, dir.path());
+    cfg.target = Target::subreddit("gifs");
+    cfg.formats = vec![MediaFormat::Gif];
+    let summary = run_cfg(cfg).await;
+
+    // the JSON keeps every post; only the GIF is downloaded
+    assert_eq!(summary.posts, 3);
+    assert_eq!(summary.media_total, 1);
+    assert_eq!(summary.media_downloaded, 1);
+    assert_eq!(summary.media_failed, 0);
+
+    let archive = outdir(dir.path(), "r_gifs");
+    assert!(archive.join("media/posts/a1.gif").exists());
+    assert!(!archive.join("media/posts/j1.jpg").exists());
+    assert!(!archive.join("media/posts/p1.jpg").exists());
+
+    let posts: Value =
+        serde_json::from_str(&std::fs::read_to_string(archive.join("gifs_posts.json")).unwrap())
+            .unwrap();
+    assert_eq!(posts["total"], 3);
+    assert_eq!(posts["posts"].as_array().unwrap().len(), 3);
+
+    let reqs = server.received_requests().await.unwrap();
+    let media: Vec<&str> = reqs
+        .iter()
+        .filter(|r| !r.url.path().ends_with(".json"))
+        .map(|r| r.url.path())
+        .collect();
+    assert_eq!(
+        media,
+        vec!["/i/animated.gif"],
+        "only the gif may be fetched"
+    );
+}
+
+#[tokio::test]
+async fn formats_reject_mismatched_fallback_content() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    mount_gifs_api(&server, &uri, true).await;
+    let dir = tempdir().unwrap();
+
+    let mut cfg = base_cfg(&uri, dir.path());
+    cfg.target = Target::subreddit("gifs");
+    cfg.formats = vec![MediaFormat::Gif];
+    let summary = run_cfg(cfg).await;
+
+    assert_eq!(summary.posts, 4);
+    assert_eq!(summary.media_total, 2);
+    assert_eq!(summary.media_downloaded, 1);
+    assert_eq!(summary.media_failed, 1);
+
+    let media = outdir(dir.path(), "r_gifs").join("media");
+    assert!(media.join("posts/a1.gif").exists());
+    assert!(
+        !media.join("posts/b1.gif").exists(),
+        "a JPEG preview must not be stored as .gif"
+    );
+}
+
+#[tokio::test]
+async fn format_query_decides_the_stored_extension() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    mount_gifs_api(&server, &uri, false).await;
+    let dir = tempdir().unwrap();
+
+    let mut cfg = base_cfg(&uri, dir.path());
+    cfg.target = Target::subreddit("gifs");
+    cfg.formats = vec![MediaFormat::Jpg];
+    let summary = run_cfg(cfg).await;
+
+    // still.jpg and `….png?format=pjpg` are both JPEG
+    assert_eq!(summary.media_total, 2);
+    assert_eq!(summary.media_downloaded, 2);
+    assert_eq!(summary.media_failed, 0);
+
+    let media = outdir(dir.path(), "r_gifs").join("media/posts");
+    assert!(media.join("j1.jpg").exists());
+    assert!(media.join("p1.jpg").exists());
+    assert!(!media.join("p1.png").exists());
+}
+
+#[tokio::test]
+async fn formats_video_implies_videos() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    let dir = tempdir().unwrap();
+
+    let mut cfg = base_cfg(&uri, dir.path());
+    cfg.formats = vec![MediaFormat::Mp4]; // --videos not passed
+    let summary = run_cfg(cfg).await;
+
+    assert_eq!(summary.media_total, 2); // gallery animation + reddit video
+    assert_eq!(summary.media_downloaded, 2);
+    assert_eq!(summary.media_failed, 0);
+
+    let media = outdir(dir.path(), "r_testsub").join("media");
+    assert!(media.join("posts/g1_02.mp4").exists());
+    assert!(media.join("posts/v1.mp4").exists());
+    assert!(!media.join("posts/i1.jpeg").exists());
 }
 
 #[tokio::test]

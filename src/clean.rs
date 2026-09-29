@@ -84,6 +84,31 @@ pub fn is_image_url(url: &str) -> bool {
     })
 }
 
+/// [`MediaFormat`] of a URL path extension (`?query`/`#fragment` ignored).
+pub fn format_from_url(url: &str) -> Option<MediaFormat> {
+    MediaFormat::from_ext(&ext_from_url(url)?)
+}
+
+/// Format a URL's `format=` query parameter asks reddit's image resizer for
+/// (`format=pjpg` → JPEG). This is what the server actually sends, which can
+/// differ from the path extension (e.g. `….png?format=pjpg`).
+pub fn format_from_query(url: &str) -> Option<MediaFormat> {
+    let query = url.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key.eq_ignore_ascii_case("format") {
+            return MediaFormat::from_ext(value);
+        }
+    }
+    None
+}
+
+/// [`MediaFormat`] of a mime type (`image/jpeg; charset=…` accepted).
+pub fn format_from_mime(mime: &str) -> Option<MediaFormat> {
+    let base = mime.split(';').next().unwrap_or(mime).trim();
+    MediaFormat::from_ext(&ext_from_mime(base)?)
+}
+
 /// Derive the original `i.redd.it` URL of a gallery item from its media id.
 fn original_gallery_url(media_id: &str, mime: Option<&str>, media_base: &str) -> Option<String> {
     let ext = ext_from_mime(mime?)?;
@@ -317,6 +342,7 @@ fn asset_ext(asset: &MediaAsset) -> Option<String> {
         .mime
         .as_deref()
         .and_then(ext_from_mime)
+        .or_else(|| format_from_query(&asset.url).map(|f| f.name().to_string()))
         .or_else(|| ext_from_url(&asset.url))
 }
 
@@ -341,7 +367,9 @@ fn art_item(kind: &str, url: &str) -> ManifestItem {
         kind: kind.into(),
         url: url.to_string(),
         fallback: None,
-        ext: ext_from_url(url),
+        ext: format_from_query(url)
+            .map(|f| f.name().to_string())
+            .or_else(|| ext_from_url(url)),
         index: None,
         width: None,
         height: None,
@@ -409,6 +437,29 @@ pub fn build_manifest(
         }
     }
     out
+}
+
+/// Format an item will be stored as. A `format=` query parameter wins (it is
+/// what the server sends), then reddit's mime-derived `ext`, then the URL
+/// extension.
+pub fn item_format(item: &ManifestItem) -> Option<MediaFormat> {
+    format_from_query(&item.url)
+        .or_else(|| item.ext.as_deref().and_then(MediaFormat::from_ext))
+        .or_else(|| format_from_url(&item.url))
+}
+
+/// Keep only manifest items whose stored format is in `wanted`; an empty
+/// selection keeps everything. Items without a recognizable format are dropped
+/// when a selection is given, so `--formats gif` can never download something
+/// else.
+pub fn filter_manifest(manifest: Vec<ManifestItem>, wanted: &[MediaFormat]) -> Vec<ManifestItem> {
+    if wanted.is_empty() {
+        return manifest;
+    }
+    manifest
+        .into_iter()
+        .filter(|item| item_format(item).is_some_and(|f| wanted.contains(&f)))
+        .collect()
 }
 
 /// Replace characters that are awkward in file names and trim to `maxlen`.
@@ -696,5 +747,80 @@ mod tests {
         assert_eq!(sanitize_filename("a/b:c*d", 80), "a_b_c_d");
         assert_eq!(sanitize_filename("  .  ", 80), "untitled");
         assert_eq!(sanitize_filename("verylongname", 5), "veryl");
+    }
+
+    #[test]
+    fn media_formats_and_manifest_filtering() {
+        assert_eq!(MediaFormat::from_ext("JPEG"), Some(MediaFormat::Jpg));
+        assert_eq!(MediaFormat::from_ext("jpg"), MediaFormat::from_ext("jpeg"));
+        assert_eq!(MediaFormat::from_ext("pjpg"), Some(MediaFormat::Jpg));
+        assert_eq!(MediaFormat::from_ext("gifv"), None);
+        assert_eq!(
+            format_from_url("https://i.redd.it/a.GIF?s=1&format=pjpg"),
+            Some(MediaFormat::Gif)
+        );
+        assert_eq!(format_from_url("https://example.com/noext"), None);
+        assert_eq!(
+            format_from_mime("image/jpeg; charset=utf-8"),
+            Some(MediaFormat::Jpg)
+        );
+        assert_eq!(format_from_mime("application/octet-stream"), None);
+        // reddit's resizer honours `format=` over the path extension
+        assert_eq!(
+            format_from_query("https://external-preview.redd.it/a.png?format=pjpg&auto=webp&s=1"),
+            Some(MediaFormat::Jpg)
+        );
+        assert_eq!(format_from_query("https://i.redd.it/a.png"), None);
+        assert_eq!(format_from_query("https://i.redd.it/a.png?width=100"), None);
+
+        let preview = "https://external-preview.redd.it/x.png?format=pjpg&auto=webp&s=1";
+        let item = |ext: Option<&str>, url: &str| ManifestItem {
+            folder: "posts".into(),
+            id: "x".into(),
+            kind: "image".into(),
+            url: url.into(),
+            fallback: None,
+            ext: ext.map(str::to_string),
+            index: None,
+            width: None,
+            height: None,
+        };
+        let manifest = vec![
+            item(Some("jpg"), "https://i.redd.it/a.jpg"),
+            item(Some("gif"), "https://i.redd.it/a.gif"),
+            item(None, "https://i.redd.it/b.png?s=1"),
+            item(None, "https://example.com/opaque"),
+            item(Some("png"), preview),
+        ];
+
+        assert_eq!(item_format(&manifest[2]), Some(MediaFormat::Png));
+        assert_eq!(item_format(&manifest[3]), None);
+        assert_eq!(item_format(&manifest[4]), Some(MediaFormat::Jpg));
+        // no selection keeps everything, including unknown formats
+        assert_eq!(filter_manifest(manifest.clone(), &[]).len(), 5);
+        // gif only
+        let gifs = filter_manifest(manifest.clone(), &[MediaFormat::Gif]);
+        assert_eq!(gifs.len(), 1);
+        assert_eq!(gifs[0].url, "https://i.redd.it/a.gif");
+        // a jpeg selection matches `.jpg` and `?format=pjpg` previews
+        let jpegs = filter_manifest(manifest.clone(), &[MediaFormat::Jpg]);
+        assert_eq!(jpegs.len(), 2);
+        assert_eq!(jpegs[1].url, preview);
+        // a png selection must not claim the jpg preview
+        assert_eq!(filter_manifest(manifest, &[MediaFormat::Png]).len(), 1);
+    }
+
+    #[test]
+    fn external_preview_urls_follow_the_format_query() {
+        let v = serde_json::json!({
+            "id": "ext1",
+            "title": "external link",
+            "url": "https://external-preview.redd.it/abc.png?format=pjpg&auto=webp&s=1",
+        });
+        let post = clean_post(&v, "https://i.redd.it");
+        let m = build_manifest(None, std::slice::from_ref(&post), false, 0, false);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].ext.as_deref(), Some("jpg"));
+        assert_eq!(item_format(&m[0]), Some(MediaFormat::Jpg));
     }
 }

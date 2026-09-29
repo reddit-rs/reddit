@@ -7,7 +7,7 @@
 //! cannot leave a truncated file behind that a later run would mistake for
 //! cached content.
 
-use crate::clean::ext_from_url;
+use crate::clean::{ext_from_url, format_from_mime, item_format};
 use crate::models::ManifestItem;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -52,6 +52,7 @@ fn file_name(item: &ManifestItem) -> PathBuf {
     let ext = item
         .ext
         .clone()
+        .or_else(|| crate::clean::format_from_query(&item.url).map(|f| f.name().to_string()))
         .or_else(|| ext_from_url(&item.url))
         .unwrap_or_else(|| "jpg".to_string());
     let name = match item.kind.as_str() {
@@ -234,6 +235,27 @@ async fn download_one(
             };
             let status = resp.status().as_u16();
             if status == 200 {
+                // Never store a fallback of the wrong format under this file
+                // name (e.g. a jpg preview saved as `.gif`). Unknown content
+                // types are accepted; only known mismatches are rejected.
+                if let Some(expected) = item_format(item) {
+                    let actual = resp
+                        .headers()
+                        .get(wreq::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(format_from_mime);
+                    if let Some(actual) = actual
+                        && actual != expected
+                    {
+                        println!(
+                            "  skipping {}: server sent {} (expected .{})",
+                            rel.display(),
+                            actual.name(),
+                            expected.name()
+                        );
+                        break; // try the next candidate URL
+                    }
+                }
                 let bytes = match resp.bytes().await {
                     Ok(b) => b,
                     Err(_) => {
@@ -341,6 +363,14 @@ mod tests {
         );
 
         it.url = "https://example.com/download".into();
+        assert_eq!(manifest_rel_path(&it), PathBuf::from("media/posts/abc.jpg"));
+    }
+
+    #[test]
+    fn format_query_decides_the_file_extension() {
+        let mut it = item("image", "abc", None);
+        it.ext = None;
+        it.url = "https://external-preview.redd.it/x.png?format=pjpg&auto=webp&s=1".into();
         assert_eq!(manifest_rel_path(&it), PathBuf::from("media/posts/abc.jpg"));
     }
 

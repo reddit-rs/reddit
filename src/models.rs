@@ -1,5 +1,64 @@
 use serde::{Deserialize, Serialize};
 
+/// A media container the archive can store. Used by `--formats` to select
+/// which files are downloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MediaFormat {
+    Jpg,
+    Png,
+    Gif,
+    Webp,
+    Bmp,
+    Mp4,
+    Webm,
+}
+
+impl MediaFormat {
+    pub const ALL: [MediaFormat; 7] = [
+        MediaFormat::Jpg,
+        MediaFormat::Png,
+        MediaFormat::Gif,
+        MediaFormat::Webp,
+        MediaFormat::Bmp,
+        MediaFormat::Mp4,
+        MediaFormat::Webm,
+    ];
+
+    /// Canonical file extension (`jpeg` is reported as `jpg`).
+    pub fn name(self) -> &'static str {
+        match self {
+            MediaFormat::Jpg => "jpg",
+            MediaFormat::Png => "png",
+            MediaFormat::Gif => "gif",
+            MediaFormat::Webp => "webp",
+            MediaFormat::Bmp => "bmp",
+            MediaFormat::Mp4 => "mp4",
+            MediaFormat::Webm => "webm",
+        }
+    }
+
+    /// Parse a file extension or mime alias. `jpeg` and `jpg` are the same
+    /// format; matching is case-insensitive.
+    pub fn from_ext(ext: &str) -> Option<Self> {
+        Some(match ext.trim().to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" | "pjpg" => MediaFormat::Jpg,
+            "png" => MediaFormat::Png,
+            "gif" => MediaFormat::Gif,
+            "webp" => MediaFormat::Webp,
+            "bmp" => MediaFormat::Bmp,
+            "mp4" => MediaFormat::Mp4,
+            "webm" => MediaFormat::Webm,
+            _ => return None,
+        })
+    }
+
+    /// Video containers are only downloaded with `--videos` (or when
+    /// explicitly requested through `--formats`).
+    pub fn is_video(self) -> bool {
+        matches!(self, MediaFormat::Mp4 | MediaFormat::Webm)
+    }
+}
+
 /// What a CLI target points at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetKind {

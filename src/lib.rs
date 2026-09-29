@@ -13,8 +13,8 @@ pub mod html;
 pub mod models;
 
 pub use crate::models::{
-    GalleryItem, ManifestItem, MediaAsset, Post, Sort, SubredditInfo, Target, TargetKind,
-    TimeFilter, VideoInfo,
+    GalleryItem, ManifestItem, MediaAsset, MediaFormat, Post, Sort, SubredditInfo, Target,
+    TargetKind, TimeFilter, VideoInfo,
 };
 
 use crate::client::Client;
@@ -94,6 +94,9 @@ pub struct Config {
     pub time: TimeFilter,
     /// Also download reddit-hosted video files (images only by default).
     pub videos: bool,
+    /// Only download these media formats ([`MediaFormat`]; `jpeg` counts as
+    /// `jpg`). Empty = every format.
+    pub formats: Vec<MediaFormat>,
     /// Max images per gallery (`0` = all).
     pub gallery_images: usize,
     /// Only keep posts created on/after this date (YYYY-MM-DD).
@@ -123,6 +126,7 @@ impl Default for Config {
             sort: Sort::Hot,
             time: TimeFilter::All,
             videos: false,
+            formats: Vec::new(),
             gallery_images: 0,
             since: None,
             skip_icon: false,
@@ -516,10 +520,20 @@ pub async fn run(cfg: Config) -> Result<Summary> {
     let manifest = clean::build_manifest(
         about.as_ref(),
         &posts,
-        cfg.videos,
+        cfg.videos || cfg.formats.iter().any(|f| f.is_video()),
         cfg.gallery_images,
         cfg.skip_icon,
     );
+    let manifest = clean::filter_manifest(manifest, &cfg.formats);
+    if !cfg.formats.is_empty() {
+        let formats = cfg
+            .formats
+            .iter()
+            .map(|f| f.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("formats: {formats}");
+    }
 
     let mut report = DownloadReport::default();
     if !cfg.no_downloads {

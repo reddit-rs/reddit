@@ -38,6 +38,9 @@ Want more?
 # the 5 newest posts with their galleries, as JSON + images
 reddit funny --sort new --posts 5 --cookies cookies.txt
 
+# only animated GIFs (other formats are not downloaded)
+reddit gifs --formats gif --posts 0 --cookies cookies.txt
+
 # several subreddits in one run, each in its own output directory
 reddit funny rust golang --posts 0 --offline --cookies cookies.txt
 
@@ -75,6 +78,8 @@ is already on disk — see [Re-runs and caching](#re-runs-and-caching).
 --videos             also download reddit-hosted video files (images only by
                       default; reddit serves audio as a separate track, so these
                       files are silent)
+--formats LIST       only download these formats, e.g. 'gif' or 'jpg,jpeg,png'
+                      (repeatable/comma-separated; mp4/webm imply --videos)
 --gallery-images N   max images per gallery (0 = all)
 --since DATE         only posts created on/after YYYY-MM-DD
 --cookies STR|FILE   'k=v; k2=v2' or a Netscape cookies.txt path (recommended;
@@ -92,6 +97,27 @@ full URLs (`https://www.reddit.com/r/rust/top/?t=week`), including multi-subredd
 (`r/rust+golang`). Sort/time hints embedded in a URL are used when the flags are
 not given. Pass several targets to archive them in one run — each goes to its own
 directory under `--out-dir`.
+
+### Format filtering
+
+`--formats` keeps only the media containers you ask for:
+
+```sh
+reddit gifs --formats gif --posts 0 --cookies cookies.txt
+reddit pics --formats jpg,jpeg,png --cookies cookies.txt
+reddit video --formats mp4 --videos --cookies cookies.txt
+```
+
+The decision is made from reddit's own mime types and each URL's `format=`
+parameter, so `jpeg` and `jpg` are one format and a `….png?format=pjpg` preview
+is treated as the JPEG it really is — and stored with a `.jpg` name. The
+downloader also verifies the response `content-type`, so a fallback of the wrong
+format is never saved under a mismatched name. When a selection is set, media
+whose format cannot be determined is skipped rather than guessed at.
+
+The listing JSON still describes every post; filtered-out files are simply not
+downloaded, the offline viewer falls back to the original reddit URL for them
+(or hides the gallery item), and files already in `media/` are never deleted.
 
 ## Output layout
 
@@ -206,14 +232,19 @@ docker run --rm \
 ```
 
 The `latest` tag tracks the newest release; pin a version for reproducible
-archives (`ghcr.io/reddit-rs/reddit:0.2.0`). Multiple subreddits and the offline
-viewer work the same way:
+archives (`ghcr.io/reddit-rs/reddit:0.3.0`). Multiple subreddits, format
+filtering and the offline viewer work the same way:
 
 ```sh
 docker run --rm \
   -v "$PWD/output:/data" \
   -v "$PWD/cookies.txt:/cookies.txt:ro" \
   ghcr.io/reddit-rs/reddit funny rust --posts 0 --offline --cookies /cookies.txt
+
+docker run --rm \
+  -v "$PWD/output:/data" \
+  -v "$PWD/cookies.txt:/cookies.txt:ro" \
+  ghcr.io/reddit-rs/reddit gifs --formats gif --cookies /cookies.txt
 ```
 
 Archives land in `./output/` (the image sets `REDDIT_OUT_DIR=/data`, and the same
