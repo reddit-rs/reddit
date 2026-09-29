@@ -1,0 +1,39 @@
+{
+  "name": "@rddt/cli",
+  "version": "0.5.0",
+  "description": "Reddit offline archiver — a thin launcher for the native reddit binary",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reddit-rs/reddit.git",
+    "directory": "npm"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "rddt": "bin/rddt.cjs"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "platforms.cjs",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.cjs ../scripts/test/*.test.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "optionalDependencies": {
+    "@rddt/cli-darwin-arm64": "0.5.0",
+    "@rddt/cli-darwin-x64": "0.5.0",
+    "@rddt/cli-linux-arm64": "0.5.0",
+    "@rddt/cli-linux-x64": "0.5.0",
+    "@rddt/cli-win32-arm64": "0.5.0",
+    "@rddt/cli-win32-x64": "0.5.0"
+  }
+}

@@ -11,32 +11,32 @@ reddit r/rust+golang --sort new --cookies cookies.txt
 Each target gets its own `r_<name>` or `u_<name>` directory. A `+` target combines
 subreddits into one archive. Explicit sort/time flags override URL hints.
 
-| Option | Behavior |
-| --- | --- |
-| `--posts [N]` | Paginate; `0` or no value means no post cap. Omitted: first page only. |
-| `--sort ORDER` | `hot` (default), `new`, `top`, `rising`, `controversial` |
-| `--time WINDOW` | `hour`, `day`, `week`, `month`, `year`, `all` (default); for top/controversial |
-| `--since DATE` | Fetch posts created on/after `YYYY-MM-DD`; does not remove archived posts. |
-| `--out-dir DIR` | Output root; default `output`, or `REDDIT_OUT_DIR`. Explicit flag wins. |
-| `--offline` | Generate a viewer per archive and a root archive hub. |
-| `--no-raw` | Skip the latest raw listing dump. |
-| `--no-downloads` | Save JSON without downloading media. |
+| Option           | Behavior                                                                       |
+| ---------------- | ------------------------------------------------------------------------------ |
+| `--posts [N]`    | Paginate; `0` or no value means no post cap. Omitted: first page only.         |
+| `--sort ORDER`   | `hot` (default), `new`, `top`, `rising`, `controversial`                       |
+| `--time WINDOW`  | `hour`, `day`, `week`, `month`, `year`, `all` (default); for top/controversial |
+| `--since DATE`   | Fetch posts created on/after `YYYY-MM-DD`; does not remove archived posts.     |
+| `--out-dir DIR`  | Output root; default `output`, or `REDDIT_OUT_DIR`. Explicit flag wins.        |
+| `--offline`      | Generate a viewer per archive and a root archive hub.                          |
+| `--no-raw`       | Skip the latest raw listing dump.                                              |
+| `--no-downloads` | Save JSON without downloading media.                                           |
 
 Reddit limits listing history. Pagination stops when the listing ends, stops
 adding posts, or reaches the 200-page safety limit.
 
 ## Media options
 
-| Option | Behavior |
-| --- | --- |
-| `--videos` | Include Reddit-hosted videos (silent; audio is a separate track). |
-| `--formats LIST` | Comma-separated or repeated: `jpg`, `jpeg`, `png`, `gif`, `webp`, `bmp`, `mp4`, `webm`. Video formats imply `--videos`. |
-| `--gallery-images N` | Maximum items per gallery; `0` (default) keeps all. |
-| `--no-icon` | Skip subreddit icon/banner downloads. |
-| `--min-size WxH` | Require still-image short side ≥ W and long side ≥ H, regardless of orientation. |
-| `--max-size WxH` | Fit stills within a width/height box; preserve aspect ratio, never upscale. |
-| `--convert FORMAT` | Convert JPEG/PNG/BMP stills to `jpg` (or `jpeg`) or `png`. |
-| `--quality N` | JPEG quality for rewritten images, 1–100; default 85. |
+| Option               | Behavior                                                                                                                |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `--videos`           | Include Reddit-hosted videos (silent; audio is a separate track).                                                       |
+| `--formats LIST`     | Comma-separated or repeated: `jpg`, `jpeg`, `png`, `gif`, `webp`, `bmp`, `mp4`, `webm`. Video formats imply `--videos`. |
+| `--gallery-images N` | Maximum items per gallery; `0` (default) keeps all.                                                                     |
+| `--no-icon`          | Skip subreddit icon/banner downloads.                                                                                   |
+| `--min-size WxH`     | Require still-image short side ≥ W and long side ≥ H, regardless of orientation.                                        |
+| `--max-size WxH`     | Fit stills within a width/height box; preserve aspect ratio, never upscale.                                             |
+| `--convert FORMAT`   | Convert JPEG/PNG/BMP stills to `jpg` (or `jpeg`) or `png`.                                                              |
+| `--quality N`        | JPEG quality for rewritten images, 1–100; default 85.                                                                   |
 
 Format selection uses URL parameters and MIME types; `jpeg` and `jpg` are
 equivalent. Known response-format mismatches are rejected. Unknown formats are

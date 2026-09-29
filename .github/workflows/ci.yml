@@ -19,6 +19,19 @@ env:
   RUSTDOCFLAGS: -Dwarnings
 
 jobs:
+  npm:
+    name: npm launcher / release helpers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24.21.0
+      - run: npm test --prefix npm
+      - run: node scripts/release.mjs verify
+      - name: Check JavaScript and documentation formatting
+        run: npx --yes prettier@3.9.9 --check npm scripts .github/workflows README.md docs
+
   check:
     name: fmt / clippy / test / docs (ubuntu)
     runs-on: ubuntu-latest

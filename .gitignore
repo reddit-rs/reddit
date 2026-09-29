@@ -7,3 +7,8 @@ output/
 cookies.txt
 
 .DS_Store
+
+# JavaScript dependencies and release staging
+node_modules/
+dist/
+*.tgz

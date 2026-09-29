@@ -16,4 +16,8 @@ cargo test --all-targets --all-features --locked
 echo "[pre-commit] Building documentation..."
 cargo doc --no-deps --all-features --locked
 
+echo "[pre-commit] Checking npm proxy and release versions..."
+npm test --prefix npm
+node scripts/release.mjs verify
+
 echo "[pre-commit] OK"

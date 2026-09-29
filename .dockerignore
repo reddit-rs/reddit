@@ -7,3 +7,6 @@ cookies.txt
 screenshot.png
 *.log
 .DS_Store
+dist
+**/node_modules
+*.tgz

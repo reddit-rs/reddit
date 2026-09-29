@@ -8,9 +8,33 @@ Supports subreddits, users, galleries, multiple targets, and incremental updates
 ## Quick start
 
 ```sh
-cargo install reddit --locked
+npx @rddt/cli pics --cookies cookies.txt --offline
+# Or use an installed native binary:
 reddit pics --cookies cookies.txt --offline
 ```
+
+## Installation
+
+**Homebrew** (macOS/Linux):
+
+```sh
+brew tap reddit-rs/reddit https://github.com/reddit-rs/reddit
+brew install reddit-rs/reddit/reddit
+```
+
+**npm** (macOS/Linux/Windows; Node.js 22+):
+
+```sh
+npm install -g @rddt/cli
+rddt --help
+```
+
+Or use `npx @rddt/cli` without a global installation. JavaScript only launches
+the matching native binary; Rust is not required.
+
+[Release binaries](https://github.com/reddit-rs/reddit/releases/latest) support
+x64 and arm64 on all three operating systems. See [distribution details](docs/install.md)
+for requirements and checksums. To build from source: `cargo install reddit --locked`.
 
 Export a Netscape-format `cookies.txt` from a browser signed in to Reddit.
 Treat it as a password: never share or commit it. Anonymous requests may return
@@ -40,6 +64,7 @@ audio track. Listings are API-limited; `--posts 0` is not a complete history.
 
 - [Usage](docs/usage.md): options, authentication, output, and caching
 - [Docker](docs/docker.md): published images and local builds
+- [Installation](docs/install.md): binaries, Homebrew, and npm
 - [Development](docs/development.md): source layout, checks, and releases
 - [Library API](https://docs.rs/reddit) · [Example](examples/archive.rs)
 
