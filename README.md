@@ -18,8 +18,7 @@ reddit pics --cookies cookies.txt --offline
 **Homebrew** (macOS/Linux):
 
 ```sh
-brew tap reddit-rs/reddit https://github.com/reddit-rs/reddit
-brew install reddit-rs/reddit/reddit
+brew install reddit-rs/tap/reddit
 ```
 
 **npm** (macOS/Linux/Windows; Node.js 22+):

@@ -78,10 +78,22 @@ the release and updates the Homebrew formula on `main`. Crate and Docker publish
 run afterward through reusable workflows. Publishing a release with `GITHUB_TOKEN`
 does not trigger other workflows, so these calls are explicit.
 
+Native Windows ARM64 builds set `CMAKE_TOOLCHAIN_FILE` to the checked-in
+`.github/cmake/windows-arm64.cmake` workaround for btls-sys issue #151. It disables
+assembly that MSBuild cannot compile and matches Rust's static CRT.
+
 Required repository secrets: `NPM_TOKEN` (publish rights to the `@rddt` scope) and
 `CARGO_REGISTRY_TOKEN` (the `crates-io` environment may supply it). npm publishing
 includes provenance. The workflow's `GITHUB_TOKEN` must be allowed to push to `main`
 for formula updates; branch protection must permit the bot or the push will fail.
+
+For the shorter `brew install reddit-rs/tap/reddit` command, add
+`HOMEBREW_TAP_TOKEN` to this repository: a fine-grained token scoped only to
+`reddit-rs/homebrew-tap`, with **Contents: read and write**. Approve it for the
+organization if required. `update-homebrew.yml` uses it to update the separate tap.
+Without this secret, that update is skipped with a warning; binary and npm
+publishing are unaffected. After adding the secret, run **Update Homebrew tap**
+with the published tag to update the bootstrap formula without rebuilding binaries.
 
 Retry a failed release with **Release binaries and installers → Run workflow**,
 specifying its existing tag. npm retries verify published package integrity rather

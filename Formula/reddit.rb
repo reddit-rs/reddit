@@ -2,8 +2,8 @@
 class Reddit < Formula
   desc "Archive Reddit listings as JSON and media with an offline viewer"
   homepage "https://github.com/reddit-rs/reddit"
-  url "https://github.com/reddit-rs/reddit.git", tag: "v0.5.0"
-  version "0.5.0"
+  url "https://github.com/reddit-rs/reddit.git", tag: "v0.5.1"
+  version "0.5.1"
   license any_of: ["MIT", "Apache-2.0"]
 
   depends_on "cmake" => :build

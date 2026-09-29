@@ -116,26 +116,29 @@ function archive(target, binary) {
     );
     fs.utimesSync(path.join(staging, file), 0, 0);
   }
+  createTarArchive(staging, name, files);
+  fs.writeFileSync(
+    path.join(output, `${name}.sha256`),
+    `${sha256(path.join(output, name))}  ${name}\n`,
+  );
+  fs.rmSync(staging, { recursive: true });
+}
+
+export function createTarArchive(staging, name, files) {
+  assert.equal(path.basename(name), name, "Archive must be a filename");
   const bsdTar = /bsdtar|libarchive/i.test(
     execFileSync("tar", ["--version"], { encoding: "utf8" }),
   );
   const ownership = bsdTar
     ? ["--uid=0", "--gid=0", "--uname=", "--gname="]
     : ["--owner=0", "--group=0", "--numeric-owner"];
-  execFileSync("tar", [
-    "--format=ustar",
-    ...ownership,
-    "-czf",
-    path.join(output, name),
-    "-C",
-    staging,
-    ...files,
-  ]);
-  fs.writeFileSync(
-    path.join(output, `${name}.sha256`),
-    `${sha256(path.join(output, name))}  ${name}\n`,
+  // GNU tar interprets a Windows drive prefix in -f as a remote host. Keep
+  // every CLI path relative; child_process handles the absolute working dir.
+  execFileSync(
+    "tar",
+    ["--format=ustar", ...ownership, "-czf", `../${name}`, ...files],
+    { cwd: staging },
   );
-  fs.rmSync(staging, { recursive: true });
 }
 
 export function renderFormula(version, checksums) {
@@ -177,7 +180,8 @@ function prepare() {
   for (const [key, target] of Object.entries(platforms)) {
     const name = assetName(version, target);
     checksums[target] = verifyChecksum(directory, name);
-    const entries = execFileSync("tar", ["-tzf", path.join(directory, name)], {
+    const entries = execFileSync("tar", ["-tzf", name], {
+      cwd: directory,
       encoding: "utf8",
     })
       .trim()
@@ -190,7 +194,9 @@ function prepare() {
     );
     const extracted = path.join(directory, `extracted-${target}`);
     fs.mkdirSync(extracted, { recursive: true });
-    execFileSync("tar", ["-xzf", path.join(directory, name), "-C", extracted]);
+    execFileSync("tar", ["-xzf", name, "-C", path.basename(extracted)], {
+      cwd: directory,
+    });
     const pkg = path.join(packages, `cli-${key}`);
     fs.mkdirSync(path.join(pkg, "bin"), { recursive: true });
     const binary = path.join(pkg, "bin", binaryName(target));

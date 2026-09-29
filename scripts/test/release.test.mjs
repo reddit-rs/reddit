@@ -1,15 +1,45 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
+  createTarArchive,
   assetName,
   renderFormula,
   verifyChecksum,
   verifyVersion,
 } from "../release.mjs";
+
+test("tar writes archives outside an absolute staging path, including Windows drives", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "reddit-tar-"));
+  try {
+    const staging = path.join(directory, "staging with spaces");
+    fs.mkdirSync(staging);
+    fs.writeFileSync(path.join(staging, "reddit"), "binary fixture");
+    createTarArchive(staging, "archive.tar.gz", ["reddit"]);
+    assert.equal(
+      execFileSync("tar", ["-tzf", "archive.tar.gz"], {
+        cwd: directory,
+        encoding: "utf8",
+      }).trim(),
+      "reddit",
+    );
+    const extracted = path.join(directory, "extracted");
+    fs.mkdirSync(extracted);
+    execFileSync("tar", ["-xzf", "archive.tar.gz", "-C", "extracted"], {
+      cwd: directory,
+    });
+    assert.equal(
+      fs.readFileSync(path.join(extracted, "reddit"), "utf8"),
+      "binary fixture",
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true });
+  }
+});
 
 test("release tags and package versions must agree", () => {
   const version = verifyVersion();

@@ -22,7 +22,7 @@ env:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
@@ -99,10 +99,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # btls-sys disables assembly on Windows; Git supplies Perl.
+          # Git supplies Perl; LLVM supplies libclang for bindgen.
           "$env:ProgramFiles\Git\usr\bin" >> $env:GITHUB_PATH
           "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" >> $env:GITHUB_ENV
           "RUSTFLAGS=-Dwarnings -C target-feature=+crt-static" >> $env:GITHUB_ENV
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            "CMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE/.github/cmake/windows-arm64.cmake" >> $env:GITHUB_ENV
+          }
+      - name: Test npm launcher and release helpers on the native platform
+        run: npm test --prefix npm
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: release-${{ matrix.target }}
@@ -127,7 +132,7 @@ jobs:
 
   assets:
     needs: [version, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -172,7 +177,7 @@ jobs:
 
   npm:
     needs: [version, assets]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -201,7 +206,7 @@ jobs:
 
   homebrew:
     needs: [version, npm]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -242,6 +247,14 @@ jobs:
     with:
       tag: ${{ needs.version.outputs.tag }}
     secrets: inherit
+
+  tap:
+    needs: [version, homebrew]
+    uses: ./.github/workflows/update-homebrew.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   docker:
     needs: [version, homebrew]

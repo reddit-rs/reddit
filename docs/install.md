@@ -17,7 +17,7 @@ Verify downloads before installing. For example, on Linux:
 
 ```sh
 sha256sum --ignore-missing --check SHA256SUMS
-tar -xzf reddit-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf reddit-v0.5.1-x86_64-unknown-linux-gnu.tar.gz
 ./reddit --version
 ```
 
@@ -28,14 +28,15 @@ On macOS, use `shasum -a 256 <archive>`; on Windows, use PowerShell
 ## Homebrew
 
 ```sh
-brew tap reddit-rs/reddit https://github.com/reddit-rs/reddit
-brew install reddit-rs/reddit/reddit
-brew upgrade reddit-rs/reddit/reddit
+brew install reddit-rs/tap/reddit
+brew upgrade reddit-rs/tap/reddit
 ```
 
-The tap lives in this repository's `Formula/` directory. Successful releases
-update the formula with platform-specific binary URLs and SHA-256 checksums.
+The tap lives in [reddit-rs/homebrew-tap](https://github.com/reddit-rs/homebrew-tap).
+Homebrew adds it automatically. Successful releases update the formula with
+platform-specific binary URLs and SHA-256 checksums once the tap token is configured.
 The initial source formula is a bootstrap until the first binary release finishes.
+The original tap in this repository remains available for compatibility.
 
 ## npm / npx
 
@@ -43,7 +44,7 @@ The initial source formula is a bootstrap until the first binary release finishe
 npx @rddt/cli --help
 npx @rddt/cli pics --offline --cookies cookies.txt
 # Pin a version for reproducibility:
-npx @rddt/cli@0.5.0 --version
+npx @rddt/cli@0.5.1 --version
 ```
 
 Or install globally with `npm install -g @rddt/cli` and run `rddt`.
