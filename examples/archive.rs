@@ -32,8 +32,8 @@ async fn main() -> anyhow::Result<()> {
 
     let summary = reddit::run(cfg).await?;
     println!(
-        "{} posts | media: {} downloaded, {} failed",
-        summary.posts, summary.media_total, summary.media_failed
+        "{} posts | media: {} downloaded, {} cached, {} failed",
+        summary.posts, summary.media_downloaded, summary.media_cached, summary.media_failed
     );
     Ok(())
 }

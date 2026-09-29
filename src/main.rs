@@ -7,25 +7,28 @@ use std::path::PathBuf;
 #[command(
     name = "reddit",
     version,
-    about = "Reddit offline viewer: save a subreddit's posts and media as JSON",
+    about = "Reddit offline viewer: save subreddit posts and media as JSON",
     long_about = "Offline viewer for reddit. By default it saves the first page of a \
 listing (~25 posts) as JSON and downloads their images — galleries keep every image, \
 videos are skipped. Use --posts 0 to paginate the whole listing and --videos to grab \
 reddit-hosted video files.\n\n\
+Several subreddits (or users) can be archived in one run; each gets its own directory \
+under the output root. Re-running a target is incremental: the fresh listing is merged \
+into the existing archive and media files already on disk are not downloaded again.\n\n\
 Pass --cookies with a Netscape cookies.txt (or 'k=v; k2=v2'). Reddit rejects \
 anonymous JSON requests from many networks, so cookies exported from your browser \
 are the reliable way to fetch any listing — they also unlock private and NSFW \
 subreddits, provided the account can view them.\n\n\
 Examples:\n  \
 reddit funny --cookies cookies.txt\n  \
+reddit funny rust --posts 0 --offline --cookies cookies.txt\n  \
 reddit https://www.reddit.com/r/funny --sort new --posts 5 --cookies cookies.txt\n  \
-reddit rust --posts 0 --offline --cookies cookies.txt\n  \
 reddit u/spez --sort top --time year --gallery-images 10 --cookies cookies.txt"
 )]
 struct Cli {
-    /// Subreddit or user: name, r/name, u/name or a full reddit URL
-    #[arg(value_name = "SUBREDDIT_OR_URL")]
-    target: String,
+    /// One or more subreddits/users: name, r/name, u/name or a full reddit URL
+    #[arg(value_name = "SUBREDDIT_OR_URL", required = true, num_args = 1..)]
+    targets: Vec<String>,
 
     /// Netscape cookies.txt path or 'k=v; k2=v2' string
     /// (recommended: reddit rejects anonymous JSON requests; also unlocks private/NSFW)
@@ -49,7 +52,7 @@ struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "0", value_name = "N")]
     posts: Option<Option<u64>>,
 
-    /// listing order [default: hot, or the order in the URL]
+    /// listing order [default: hot, or the order in each URL]
     #[arg(long, value_enum, value_name = "ORDER")]
     sort: Option<SortArg>,
 
@@ -81,7 +84,7 @@ struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     no_downloads: bool,
 
-    /// generate a self-contained index.html to browse the archive offline
+    /// generate self-contained index.html viewers (plus an archive hub)
     #[arg(long, action = ArgAction::SetTrue)]
     offline: bool,
 }
@@ -133,47 +136,90 @@ impl From<TimeArg> for TimeFilter {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let parsed = reddit::parse_target(&cli.target)?;
 
-    // explicit flags win over hints embedded in the URL
-    let sort = cli
-        .sort
-        .map(Sort::from)
-        .or(parsed.sort)
-        .unwrap_or(Sort::Hot);
-    let time = cli
-        .time
-        .map(TimeFilter::from)
-        .or(parsed.time)
-        .unwrap_or(TimeFilter::All);
+    // Parse every target up front: a typo should fail before any network call.
+    let parsed: Vec<reddit::ParsedTarget> = cli
+        .targets
+        .iter()
+        .map(|raw| reddit::parse_target(raw))
+        .collect::<Result<_>>()?;
+
     let posts = match cli.posts {
         Some(Some(n)) => PostsMode::All(n),
         Some(None) => PostsMode::All(0),
         None => PostsMode::Snapshot,
     };
 
-    let cfg = Config {
-        target: parsed.target,
-        cookies: cli.cookies,
-        user_agent: cli.user_agent,
-        out_dir: cli.out_dir,
-        posts,
-        sort,
-        time,
-        videos: cli.videos,
-        gallery_images: cli.gallery_images,
-        since: cli.since,
-        skip_icon: cli.no_icon,
-        no_raw: cli.no_raw,
-        no_downloads: cli.no_downloads,
-        offline: cli.offline,
-        ..Config::default()
-    };
+    let multiple = parsed.len() > 1;
+    let mut summaries = Vec::with_capacity(parsed.len());
+    let mut failures = Vec::new();
 
-    let summary = reddit::run(cfg).await?;
+    for (i, parsed) in parsed.into_iter().enumerate() {
+        // explicit flags win over hints embedded in the URL
+        let sort = cli
+            .sort
+            .map(Sort::from)
+            .or(parsed.sort)
+            .unwrap_or(Sort::Hot);
+        let time = cli
+            .time
+            .map(TimeFilter::from)
+            .or(parsed.time)
+            .unwrap_or(TimeFilter::All);
+
+        if multiple {
+            println!(
+                "\n=== {} ({}/{}) ===",
+                parsed.target.display(),
+                i + 1,
+                cli.targets.len()
+            );
+        }
+
+        let cfg = Config {
+            target: parsed.target,
+            cookies: cli.cookies.clone(),
+            user_agent: cli.user_agent.clone(),
+            out_dir: cli.out_dir.clone(),
+            posts,
+            sort,
+            time,
+            videos: cli.videos,
+            gallery_images: cli.gallery_images,
+            since: cli.since.clone(),
+            skip_icon: cli.no_icon,
+            no_raw: cli.no_raw,
+            no_downloads: cli.no_downloads,
+            offline: cli.offline,
+            ..Config::default()
+        };
+
+        let label = cfg.target.display();
+        match reddit::run(cfg).await {
+            Ok(summary) => summaries.push(summary),
+            Err(e) => failures.push(format!("{label}: {e}")),
+        }
+    }
+
+    if !failures.is_empty() {
+        for f in &failures {
+            eprintln!("error: {f}");
+        }
+        anyhow::bail!(
+            "{} of {} archive(s) failed",
+            failures.len(),
+            cli.targets.len()
+        );
+    }
+
+    let total = |f: fn(&reddit::Summary) -> usize| summaries.iter().map(f).sum::<usize>();
     println!(
-        "\ndone — {} posts | media: {} downloaded ({} failed)",
-        summary.posts, summary.media_total, summary.media_failed
+        "\ndone — {} posts ({} new) | media: {} downloaded, {} cached, {} failed",
+        total(|s| s.posts),
+        total(|s| s.posts_new),
+        total(|s| s.media_downloaded),
+        total(|s| s.media_cached),
+        total(|s| s.media_failed),
     );
     Ok(())
 }

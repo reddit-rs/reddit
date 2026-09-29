@@ -8,6 +8,10 @@
 //! lightbox for viewing images, galleries, self posts and (when downloaded)
 //! videos. Media is served from the local `media/` directory when the file was
 //! downloaded, otherwise it falls back to the original reddit CDN URL.
+//!
+//! When several archives live in the same output directory, [`render_hub`]
+//! builds the root `index.html` that links them together; each archive page
+//! links back to it with [`ViewerMeta::hub`].
 
 use crate::download::manifest_rel_path;
 use crate::models::*;
@@ -22,6 +26,29 @@ pub struct ViewerMeta<'a> {
     pub sort: Sort,
     pub time: TimeFilter,
     pub fetched_at: &'a str,
+    /// Link back to the archive hub (`../index.html`).
+    pub hub: bool,
+}
+
+/// One archive directory shown on the output root `index.html`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchiveEntry {
+    /// Directory under the output root (`r_funny`).
+    pub dir: String,
+    /// Listing display name (`r/funny`, `u/spez`).
+    pub display: String,
+    /// Subreddit title from `about.json`, when available.
+    pub title: Option<String>,
+    /// Icon path relative to the output root (`r_funny/media/subreddit_icon.png`).
+    pub icon: Option<String>,
+    /// Remote icon URL, used when the local file is missing.
+    pub icon_remote: Option<String>,
+    /// Number of posts stored in `<name>_posts.json`.
+    pub posts: usize,
+    pub fetched_at: Option<String>,
+    pub over18: bool,
+    /// Whether `<dir>/index.html` exists.
+    pub viewer: bool,
 }
 
 fn build_lookup(manifest: &[ManifestItem]) -> HashMap<MediaKey, &ManifestItem> {
@@ -150,6 +177,7 @@ pub fn render_index(
             "url": target.url(),
             "sort": sort_label,
             "fetched_at": meta.fetched_at,
+            "hub": meta.hub,
         },
         "about": about_json,
         "posts": posts.iter().map(|p| post_json(p, &lookup)).collect::<Vec<_>>(),
@@ -159,6 +187,36 @@ pub fn render_index(
         .expect("viewer data serializes")
         .replace("</", "<\\/");
     PAGE_TEMPLATE.replace("__DATA__", &json_str)
+}
+
+/// Render the output root hub: one card per archive directory, newest first.
+pub fn render_hub(entries: &[ArchiveEntry]) -> String {
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|a, b| b.fetched_at.cmp(&a.fetched_at).then(a.dir.cmp(&b.dir)));
+
+    let data = json!({
+        "archives": sorted
+            .iter()
+            .map(|e| json!({
+                "dir": e.dir,
+                "display": e.display,
+                "title": e.title,
+                "icon": e.icon,
+                "iconRemote": e.icon_remote,
+                "posts": e.posts,
+                "fetchedAt": e.fetched_at,
+                "over18": e.over18,
+                "viewer": e.viewer,
+            }))
+            .collect::<Vec<_>>(),
+    });
+
+    HUB_TEMPLATE.replace(
+        "__DATA__",
+        &serde_json::to_string(&data)
+            .expect("hub data serializes")
+            .replace("</", "<\\/"),
+    )
 }
 
 const PAGE_TEMPLATE: &str = r##"<!doctype html>
@@ -174,6 +232,8 @@ const PAGE_TEMPLATE: &str = r##"<!doctype html>
   header.sub { position: relative; }
   .banner { height: 150px; background-size: cover; background-position: center; border-bottom: 1px solid #262626; }
   .headrow { display: flex; gap: 18px; align-items: flex-start; padding: 22px 28px 18px; flex-wrap: wrap; }
+  .hub { display: inline-block; margin: 12px 28px 0; color: #8a8a8a; font-size: 12.5px; text-decoration: none; }
+  .hub:hover { color: #fff; }
   .icon { width: 76px; height: 76px; border-radius: 50%; object-fit: cover; background: #1a1a1a; flex-shrink: 0; }
   .icon.fallback { display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 600; color: #fff; background: linear-gradient(135deg, #ff4500, #ff8717); user-select: none; }
   h1 { font-size: 21px; margin: 0; }
@@ -221,6 +281,7 @@ const PAGE_TEMPLATE: &str = r##"<!doctype html>
     .arrow { width: 44px; height: 44px; font-size: 22px; }
     .close { width: 44px; height: 44px; top: 12px; right: 14px; font-size: 26px; }
     .headrow { padding: 16px; gap: 14px; }
+    .hub { margin: 10px 16px 0; }
     .icon { width: 58px; height: 58px; font-size: 24px; }
     .banner { height: 96px; }
     h1 { font-size: 18px; }
@@ -279,6 +340,7 @@ document.title = DATA.target.display + " — offline archive";
   ].filter(Boolean).join("");
   $("head").innerHTML =
     (banner ? '<div class="banner" style="background-image:url(' + esc(banner) + ')"></div>' : "") +
+    (DATA.target.hub ? '<a class="hub" href="../index.html">&#8592; All archives</a>' : "") +
     '<div class="headrow">' +
       (icon
         ? '<img class="icon" src="' + esc(icon) + '" alt="">'
@@ -443,6 +505,94 @@ renderView();
 </body>
 </html>"##;
 
+const HUB_TEMPLATE: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reddit — offline archives</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f0f0f; color: #f5f5f5; }
+  header { padding: 34px 28px 8px; }
+  h1 { margin: 0; font-size: 24px; }
+  h1 small { color: #8a8a8a; font-size: 14px; font-weight: 500; }
+  .lede { color: #a8a8a8; font-size: 13.5px; margin: 10px 0 0; }
+  main { padding: 18px 20px 40px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 10px; }
+  .card { display: flex; gap: 14px; align-items: center; padding: 14px 16px; border-radius: 10px; background: #1a1a1a; border: 1px solid #262626; color: inherit; text-decoration: none; transition: border-color .15s ease, background .15s ease; }
+  a.card:hover { border-color: #ff4500; background: #1f1f1f; }
+  .card.disabled { opacity: .65; }
+  .icon { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; background: #262626; flex-shrink: 0; }
+  .icon.fallback { display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 600; color: #fff; background: linear-gradient(135deg, #ff4500, #ff8717); user-select: none; }
+  .card h2 { margin: 0 0 4px; font-size: 16px; }
+  .card h2 small { color: #8a8a8a; font-size: 12.5px; font-weight: 500; }
+  .badge { background: #b91c1c; color: #fff; font-size: 10px; font-weight: 700; border-radius: 4px; padding: 2px 5px; vertical-align: 1px; }
+  .meta { margin: 0; color: #8a8a8a; font-size: 12.5px; }
+  .empty { color: #8a8a8a; text-align: center; padding: 56px 0; }
+  footer { padding: 16px 28px 28px; color: #565656; font-size: 12px; }
+  @media (max-width: 640px) {
+    header { padding: 24px 16px 4px; }
+    main { padding: 12px 10px 28px; }
+    .grid { grid-template-columns: 1fr; gap: 6px; }
+    .card { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>reddit <small>offline archives</small></h1>
+  <p class="lede" id="lede"></p>
+</header>
+<main id="view"></main>
+<footer>Generated by the <b>reddit</b> offline viewer · github.com/reddit-rs/reddit</footer>
+<script type="application/json" id="rd-data">__DATA__</script><script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("rd-data").textContent);
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const fmt = (n) => n == null ? "" : (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "K" : String(n));
+const fmtDate = (iso) => iso ? new Date(iso).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+const iconLetter = (a) => ((a.title || a.display || "?").replace(/^[ru]\//, "").charAt(0) || "?").toUpperCase();
+const noun = DATA.archives.length === 1 ? "archive" : "archives";
+
+document.title = DATA.archives.length + " " + noun + " — reddit offline";
+$("lede").textContent = DATA.archives.length
+  ? DATA.archives.length + " " + noun + " on disk — open one to browse its posts."
+  : "No archives yet.";
+
+function card(a, i) {
+  const title = a.title && a.title !== a.display ? ' <small>' + esc(a.title) + '</small>' : "";
+  const nsfw = a.over18 ? ' <span class="badge">18+</span>' : "";
+  const icon = a.icon
+    ? '<img class="icon" loading="lazy" src="' + esc(a.icon) + '" alt="">'
+    : '<div class="icon fallback">' + esc(iconLetter(a)) + '</div>';
+  const meta = [
+    fmt(a.posts) + (a.posts === 1 ? " post" : " posts"),
+    a.fetchedAt ? "fetched " + fmtDate(a.fetchedAt) : "",
+    a.viewer ? "" : "no viewer (run --offline)",
+  ].filter(Boolean).join(" · ");
+  const inner = icon + '<div><h2>' + esc(a.display) + title + nsfw + '</h2><p class="meta">' + esc(meta) + '</p></div>';
+  return a.viewer
+    ? '<a class="card" data-i="' + i + '" href="' + esc(a.dir) + '/index.html">' + inner + '</a>'
+    : '<div class="card disabled" data-i="' + i + '">' + inner + '</div>';
+}
+
+$("view").innerHTML = DATA.archives.length
+  ? '<div class="grid">' + DATA.archives.map(card).join("") + '</div>'
+  : '<div class="empty">Nothing here yet — run <b>reddit &lt;subreddit&gt; --offline</b> to build an archive.</div>';
+
+// remote icon fallback when the local file is missing
+document.querySelectorAll("#view img.icon").forEach((img) => {
+  const a = DATA.archives[Number(img.closest(".card").dataset.i)];
+  if (!a || !a.iconRemote) return;
+  img.addEventListener("error", () => { img.src = a.iconRemote; }, { once: true });
+});
+</script>
+</body>
+</html>"##;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +647,7 @@ mod tests {
             sort: Sort::New,
             time: TimeFilter::All,
             fetched_at: "2026-09-28T12:00:00+00:00",
+            hub: true,
         }
     }
 
@@ -543,5 +694,61 @@ mod tests {
     fn post_kind_label() {
         assert_eq!(image_post().media_kind(), "image");
         assert_eq!(gallery_post().media_kind(), "gallery");
+    }
+
+    #[test]
+    fn archive_page_links_back_to_the_hub() {
+        let posts = vec![image_post()];
+        let m = manifest(&posts);
+        let html = render_index(&Target::subreddit("testsub"), None, &posts, &m, &meta());
+        assert!(html.contains("\"hub\":true"));
+        assert!(html.contains("All archives"));
+
+        let no_hub = ViewerMeta {
+            hub: false,
+            ..meta()
+        };
+        let html = render_index(&Target::subreddit("testsub"), None, &posts, &m, &no_hub);
+        assert!(html.contains("\"hub\":false"));
+    }
+
+    fn entry(dir: &str, display: &str) -> ArchiveEntry {
+        ArchiveEntry {
+            dir: dir.into(),
+            display: display.into(),
+            title: Some("Archived sub".into()),
+            icon: Some(format!("{dir}/media/subreddit_icon.png")),
+            icon_remote: Some("https://styles.redditmedia.com/i.png".into()),
+            posts: 3,
+            fetched_at: Some("2026-09-28T12:00:00+00:00".into()),
+            over18: false,
+            viewer: true,
+        }
+    }
+
+    #[test]
+    fn hub_lists_every_archive() {
+        let mut disabled = entry("r_old", "r/old");
+        disabled.viewer = false;
+        let html = render_hub(&[
+            entry("r_testsub", "r/testsub"),
+            entry("u_spez", "u/spez"),
+            disabled,
+        ]);
+
+        assert!(html.contains("\"dir\":\"r_testsub\""));
+        assert!(html.contains("\"dir\":\"u_spez\""));
+        assert!(html.contains("r_testsub/media/subreddit_icon.png"));
+        assert!(html.contains("https://styles.redditmedia.com/i.png"));
+        assert!(html.contains("\"viewer\":false"));
+        assert!(html.contains("run --offline"));
+        assert!(!html.contains("__DATA__"));
+    }
+
+    #[test]
+    fn empty_hub_renders() {
+        let html = render_hub(&[]);
+        assert!(html.contains("No archives yet"));
+        assert!(!html.contains("__DATA__"));
     }
 }

@@ -141,6 +141,14 @@ fn page_two(server_uri: &str) -> Value {
     })
 }
 
+/// A second subreddit, used for the multi-archive hub tests.
+fn second_page(server_uri: &str) -> Value {
+    json!({
+        "kind": "Listing",
+        "data": {"after": null, "children": [{"kind": "t3", "data": image_post(server_uri)}]}
+    })
+}
+
 async fn mount_api(server: &MockServer, uri: &str) {
     Mock::given(method("GET"))
         .and(path("/r/testsub/about.json"))
@@ -199,6 +207,28 @@ async fn mount_api(server: &MockServer, uri: &str) {
         .and(path("/user/testuser/submitted.json"))
         .and(query_param_is_missing("after"))
         .respond_with(ResponseTemplate::new(200).set_body_json(user_page))
+        .mount(server)
+        .await;
+
+    // second subreddit (multi-archive hub tests)
+    Mock::given(method("GET"))
+        .and(path("/r/second/about.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "t5",
+            "data": {
+                "display_name": "second",
+                "title": "Second Sub",
+                "subscribers": 10,
+                "over18": false,
+                "icon_img": format!("{uri}/art/icon.png")
+            }
+        })))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/r/second/hot.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(second_page(uri)))
         .mount(server)
         .await;
 
@@ -276,6 +306,17 @@ fn manifest(dir: &std::path::Path) -> Vec<ManifestItem> {
 
 async fn run_cfg(cfg: Config) -> reddit::Summary {
     reddit::run(cfg).await.unwrap()
+}
+
+/// Requests that are not listing/about JSON — i.e. media fetches.
+async fn media_requests(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| !r.url.path().ends_with(".json"))
+        .count()
 }
 
 #[tokio::test]
@@ -555,6 +596,111 @@ async fn offline_viewer_renders_local_media() {
     assert!(html.contains("media/subreddit_icon.png"));
     assert!(html.contains("Jane gallery"));
     assert!(!html.contains("__DATA__"));
+}
+
+#[tokio::test]
+async fn rerun_uses_the_cache_instead_of_downloading_again() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    let dir = tempdir().unwrap();
+
+    let first = run_cfg(base_cfg(&uri, dir.path())).await;
+    assert_eq!(first.posts, 3);
+    assert_eq!(first.posts_new, 3);
+    assert_eq!(first.media_downloaded, 7);
+    assert_eq!(first.media_cached, 0);
+    let requests_after_first = media_requests(&server).await;
+    assert_eq!(requests_after_first, 7);
+
+    let second = run_cfg(base_cfg(&uri, dir.path())).await;
+    assert_eq!(second.posts, 3);
+    assert_eq!(second.posts_new, 0);
+    assert_eq!(second.media_downloaded, 0);
+    assert_eq!(second.media_cached, 7);
+    assert_eq!(second.media_failed, 0);
+    assert_eq!(
+        media_requests(&server).await,
+        requests_after_first,
+        "cached media must not be requested again"
+    );
+}
+
+#[tokio::test]
+async fn empty_files_are_not_treated_as_cached() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    let dir = tempdir().unwrap();
+
+    // populate the archive, then corrupt one file as an interrupted run would
+    run_cfg(base_cfg(&uri, dir.path())).await;
+    let media = outdir(dir.path(), "r_testsub").join("media/posts");
+    std::fs::write(media.join("i1.jpeg"), b"").unwrap();
+
+    let summary = run_cfg(base_cfg(&uri, dir.path())).await;
+    assert_eq!(summary.media_cached, 6);
+    assert_eq!(summary.media_downloaded, 1);
+    assert_eq!(summary.media_failed, 0);
+    assert!(std::fs::metadata(media.join("i1.jpeg")).unwrap().len() > 0);
+    assert!(!media.join("i1.jpeg.part").exists());
+}
+
+#[tokio::test]
+async fn rerun_merges_posts_instead_of_replacing_them() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    let dir = tempdir().unwrap();
+
+    // first run archives a single post...
+    let mut cfg = base_cfg(&uri, dir.path());
+    cfg.posts = PostsMode::All(1);
+    let first = run_cfg(cfg).await;
+    assert_eq!(first.posts, 1);
+
+    // ...the second run adds the other two without dropping the first
+    let second = run_cfg(base_cfg(&uri, dir.path())).await;
+    assert_eq!(second.posts, 3);
+    assert_eq!(second.posts_new, 2);
+
+    let posts = read_json(dir.path(), "testsub_posts.json");
+    assert_eq!(posts["total"], 3);
+    assert_eq!(posts["posts"].as_array().unwrap().len(), 3);
+    let ids: Vec<&str> = posts["posts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["g1", "i1", "v1"]);
+}
+
+#[tokio::test]
+async fn offline_multi_target_writes_hub_and_backlinks() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    let dir = tempdir().unwrap();
+
+    let mut first = base_cfg(&uri, dir.path());
+    first.offline = true;
+    run_cfg(first).await;
+
+    let mut second = base_cfg(&uri, dir.path());
+    second.target = Target::subreddit("second");
+    second.offline = true;
+    run_cfg(second).await;
+
+    let hub = std::fs::read_to_string(dir.path().join("index.html")).unwrap();
+    assert!(hub.contains("\"dir\":\"r_testsub\""));
+    assert!(hub.contains("\"dir\":\"r_second\""));
+    assert!(hub.contains("\"viewer\":true"));
+    assert!(!hub.contains("__DATA__"));
+
+    let inner =
+        std::fs::read_to_string(outdir(dir.path(), "r_testsub").join("index.html")).unwrap();
+    assert!(inner.contains("\"hub\":true"));
 }
 
 #[tokio::test]

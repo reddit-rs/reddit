@@ -2,7 +2,9 @@
 //! plus media, and optionally generate a browsable offline `index.html`.
 //!
 //! The pipeline lives in [`run`]; [`Config`] selects the target, listing sort,
-//! pagination depth, cookies and output directory.
+//! pagination depth, cookies and output directory. Runs are incremental: a
+//! fresh listing is merged into the existing archive and media files that are
+//! already on disk are never requested again.
 
 pub mod clean;
 pub mod client;
@@ -16,11 +18,11 @@ pub use crate::models::{
 };
 
 use crate::client::Client;
-use crate::download::download_all;
+use crate::download::{DownloadReport, download_all};
 use anyhow::{Result, bail};
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Browser User-Agent used by default. Reddit binds sessions to the browser
@@ -136,8 +138,17 @@ impl Default for Config {
 /// Result of a run.
 #[derive(Clone, Debug, Default)]
 pub struct Summary {
+    /// Posts in the archive after merging with previous runs.
     pub posts: usize,
+    /// Posts added to the archive by this run.
+    pub posts_new: usize,
+    /// Media files the manifest asked for.
     pub media_total: usize,
+    /// Media files fetched over the network by this run.
+    pub media_downloaded: usize,
+    /// Media files that were already on disk (not re-downloaded).
+    pub media_cached: usize,
+    /// Media files that could not be downloaded.
     pub media_failed: usize,
 }
 
@@ -244,6 +255,142 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
+async fn read_json(path: &Path) -> Option<Value> {
+    let s = tokio::fs::read_to_string(path).await.ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+/// Posts stored by a previous run (`<name>_posts.json`), if any.
+async fn load_posts(path: &Path) -> Vec<Post> {
+    let Ok(s) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+    let posts = serde_json::from_str::<Value>(&s)
+        .ok()
+        .and_then(|v| v.get("posts").cloned())
+        .and_then(|p| serde_json::from_value::<Vec<Post>>(p).ok());
+    match posts {
+        Some(posts) => posts,
+        None => {
+            println!(
+                "  warning: could not read {} — starting a new archive",
+                path.display()
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Merge a freshly fetched listing into an existing archive: posts fetched now
+/// keep their (fresher) data and listing order, posts archived earlier are
+/// appended newest first, duplicates are dropped. A re-run therefore never
+/// drops content it already has.
+fn merge_posts(fetched: Vec<Post>, previous: Vec<Post>) -> Vec<Post> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<Post> = Vec::with_capacity(fetched.len() + previous.len());
+
+    for p in fetched {
+        if p.id.is_empty() || !seen.insert(p.id.clone()) {
+            continue;
+        }
+        out.push(p);
+    }
+
+    let mut older: Vec<Post> = Vec::new();
+    for p in previous {
+        if p.id.is_empty() || !seen.insert(p.id.clone()) {
+            continue;
+        }
+        older.push(p);
+    }
+    older.sort_by(|a, b| {
+        b.created_utc
+            .cmp(&a.created_utc)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out.extend(older);
+    out
+}
+
+/// Local `media/subreddit_icon.*` path, relative to the output root.
+fn local_icon(dir: &Path, rel_dir: &str) -> Option<String> {
+    for entry in std::fs::read_dir(dir.join("media")).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("subreddit_icon.") {
+            return Some(format!("{rel_dir}/media/{name}"));
+        }
+    }
+    None
+}
+
+/// Describe every `r_*` / `u_*` archive directory under `root`.
+async fn scan_archives(root: &Path) -> Vec<html::ArchiveEntry> {
+    let mut entries = Vec::new();
+    let Ok(mut dir) = tokio::fs::read_dir(root).await else {
+        return entries;
+    };
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let (prefix, sub) = match name.strip_prefix("r_") {
+            Some(sub) => ("r/", sub),
+            None => match name.strip_prefix("u_") {
+                Some(sub) => ("u/", sub),
+                None => continue,
+            },
+        };
+        if sub.is_empty() {
+            continue;
+        }
+
+        let path = entry.path();
+        let about: Option<SubredditInfo> = read_json(&path.join(format!("{sub}_about.json")))
+            .await
+            .and_then(|v| v.get("about").cloned())
+            .and_then(|a| serde_json::from_value(a).ok());
+        let posts_json = read_json(&path.join(format!("{sub}_posts.json"))).await;
+
+        entries.push(html::ArchiveEntry {
+            dir: name.clone(),
+            display: posts_json
+                .as_ref()
+                .and_then(|v| v.get("target"))
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{prefix}{sub}")),
+            title: about.as_ref().and_then(|a| a.title.clone()),
+            icon: local_icon(&path, &name),
+            icon_remote: about.as_ref().and_then(|a| a.icon.clone()),
+            posts: posts_json
+                .as_ref()
+                .and_then(|v| v.get("posts"))
+                .and_then(|p| p.as_array())
+                .map(Vec::len)
+                .unwrap_or(0),
+            fetched_at: posts_json
+                .as_ref()
+                .and_then(|v| v.get("fetched_at"))
+                .and_then(|t| t.as_str())
+                .map(str::to_string),
+            over18: about.as_ref().is_some_and(|a| a.over_18),
+            viewer: path.join("index.html").is_file(),
+        });
+    }
+    entries.sort_by(|a, b| a.dir.cmp(&b.dir));
+    entries
+}
+
+/// Write the output root `index.html` listing every archive. Returns how many
+/// archives it links to.
+async fn write_archive_hub(root: &Path) -> Result<usize> {
+    let entries = scan_archives(root).await;
+    let count = entries.len();
+    tokio::fs::write(root.join("index.html"), html::render_hub(&entries)).await?;
+    Ok(count)
+}
+
 /// Run the pipeline: fetch the listing, save JSON, download media and
 /// optionally render the offline viewer. All network and file IO happens here.
 pub async fn run(cfg: Config) -> Result<Summary> {
@@ -311,11 +458,19 @@ pub async fn run(cfg: Config) -> Result<Summary> {
         }
         None => raw_items,
     };
-    let posts: Vec<Post> = raw_items
+    let fetched: Vec<Post> = raw_items
         .iter()
         .map(|d| clean::clean_post(d, &cfg.media_base))
         .collect();
-    println!("posts: {}", posts.len());
+
+    // Merge into the existing archive: posts saved by earlier runs stay in the
+    // JSON (and their media is not requested again below).
+    let posts_path = outdir.join(format!("{}_posts.json", cfg.target.name));
+    let previous = load_posts(&posts_path).await;
+    let known: HashSet<String> = previous.iter().map(|p| p.id.clone()).collect();
+    let posts = merge_posts(fetched, previous);
+    let posts_new = posts.iter().filter(|p| !known.contains(&p.id)).count();
+    println!("posts: {} in archive ({posts_new} new)", posts.len());
 
     let fetched_at = now_iso();
 
@@ -366,8 +521,7 @@ pub async fn run(cfg: Config) -> Result<Summary> {
         cfg.skip_icon,
     );
 
-    let mut media_total = 0;
-    let mut media_failed = 0;
+    let mut report = DownloadReport::default();
     if !cfg.no_downloads {
         save_json(
             &outdir.join("media_manifest.json"),
@@ -375,7 +529,7 @@ pub async fn run(cfg: Config) -> Result<Summary> {
         )
         .await?;
         println!("manifest: {} media files", manifest.len());
-        let (ok, failed) = download_all(
+        report = download_all(
             &manifest,
             &outdir,
             &cfg.user_agent,
@@ -383,8 +537,6 @@ pub async fn run(cfg: Config) -> Result<Summary> {
             8,
         )
         .await;
-        media_total = ok;
-        media_failed = failed;
     } else {
         println!("media downloads skipped (--no-downloads)");
     }
@@ -399,16 +551,32 @@ pub async fn run(cfg: Config) -> Result<Summary> {
                 sort: cfg.sort,
                 time: cfg.time,
                 fetched_at: &fetched_at,
+                hub: true,
             },
         );
-        tokio::fs::write(outdir.join("index.html"), page).await?;
-        println!("saved index.html (offline viewer, {} posts)", posts.len());
+        let page_path = outdir.join("index.html");
+        tokio::fs::write(&page_path, page).await?;
+        println!(
+            "saved {} (offline viewer, {} posts)",
+            page_path.display(),
+            posts.len()
+        );
+
+        let archives = write_archive_hub(&cfg.out_dir).await?;
+        println!(
+            "saved {} (archive hub, {archives} archive{})",
+            cfg.out_dir.join("index.html").display(),
+            if archives == 1 { "" } else { "s" }
+        );
     }
 
     Ok(Summary {
         posts: posts.len(),
-        media_total,
-        media_failed,
+        posts_new,
+        media_total: report.total,
+        media_downloaded: report.downloaded,
+        media_cached: report.cached,
+        media_failed: report.failed,
     })
 }
 
@@ -498,5 +666,86 @@ mod tests {
         assert_eq!(PostsMode::All(7).max_pages(), crate::client::MAX_PAGES);
         assert_eq!(PostsMode::All(500).page_size(), 100);
         assert_eq!(PostsMode::All(500).cap(), Some(500));
+    }
+
+    fn post(id: &str, created: i64) -> Post {
+        Post {
+            id: id.into(),
+            created_utc: created,
+            ..Post::default()
+        }
+    }
+
+    #[test]
+    fn merge_keeps_fresh_data_and_appends_older_posts() {
+        let fetched = vec![post("b", 20), post("c", 30)];
+        let previous = vec![post("a", 10), post("b", 5), post("d", 40)];
+        let merged = merge_posts(fetched, previous);
+        let ids: Vec<&str> = merged.iter().map(|p| p.id.as_str()).collect();
+        // fresh listing order first, then previously archived posts newest first
+        assert_eq!(ids, vec!["b", "c", "d", "a"]);
+        // the fresh entry wins over the stale copy
+        assert_eq!(merged[0].created_utc, 20);
+    }
+
+    #[test]
+    fn merge_drops_empty_and_duplicate_ids() {
+        let merged = merge_posts(
+            vec![post("", 1), post("a", 2), post("a", 3)],
+            vec![post("a", 4), post("", 5), post("", 6)],
+        );
+        let ids: Vec<&str> = merged.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["a"]);
+        assert_eq!(merged[0].created_utc, 2);
+    }
+
+    #[tokio::test]
+    async fn scan_archives_reads_metadata_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let sub = root.join("r_funny");
+        std::fs::create_dir_all(sub.join("media")).unwrap();
+        std::fs::write(sub.join("media/subreddit_icon.png"), b"x").unwrap();
+        std::fs::write(sub.join("index.html"), b"<html>").unwrap();
+        std::fs::write(
+            sub.join("funny_about.json"),
+            json!({"about": {"name": "funny", "title": "F U N N Y", "icon": "https://i.example/i.png"}})
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            sub.join("funny_posts.json"),
+            json!({
+                "target": "r/funny",
+                "fetched_at": "2026-09-29T00:00:00+00:00",
+                "posts": [{"id": "a"}, {"id": "b"}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // directories that are not archives are ignored
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+
+        let entries = scan_archives(root).await;
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.dir, "r_funny");
+        assert_eq!(e.display, "r/funny");
+        assert_eq!(e.title.as_deref(), Some("F U N N Y"));
+        assert_eq!(e.icon.as_deref(), Some("r_funny/media/subreddit_icon.png"));
+        assert_eq!(e.icon_remote.as_deref(), Some("https://i.example/i.png"));
+        assert_eq!(e.posts, 2);
+        assert!(e.viewer);
+    }
+
+    #[tokio::test]
+    async fn scan_archives_falls_back_to_directory_names() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("u_spez")).unwrap();
+        let entries = scan_archives(dir.path()).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display, "u/spez");
+        assert_eq!(entries[0].posts, 0);
+        assert!(!entries[0].viewer);
     }
 }

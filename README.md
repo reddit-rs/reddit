@@ -8,9 +8,10 @@
 > view and archive content you are allowed to access, and respect Reddit's
 > [User Agreement](https://www.redditinc.com/policies/user-agreement) and rate limits.
 
-An offline viewer for reddit — archive a subreddit for local use: structured JSON,
-every image (galleries included), and a self-contained HTML index you can browse
-without a network connection. Content is downloaded once and lives on your disk.
+An offline viewer for reddit — archive one or more subreddits for local use:
+structured JSON, every image (galleries included), and a self-contained HTML
+index you can browse without a network connection. Content is downloaded once
+and lives on your disk; re-runs only fetch what is new.
 
 ## Quick start
 
@@ -24,7 +25,7 @@ reddit funny --cookies cookies.txt
 That saves the first page of the listing (~25 posts) and their images into
 `output/r_funny/`. Galleries keep every image; videos are skipped by
 default. The folder is your archive — JSON data, media files and (with `--offline`)
-a single `index.html` that opens from disk in any browser.
+an `index.html` that opens from disk in any browser.
 
 > Reddit rejects anonymous JSON requests from many networks with `HTTP 403`, so a
 > `cookies.txt` exported from your browser (see [Authentication](#authentication))
@@ -36,6 +37,9 @@ Want more?
 ```sh
 # the 5 newest posts with their galleries, as JSON + images
 reddit funny --sort new --posts 5 --cookies cookies.txt
+
+# several subreddits in one run, each in its own output directory
+reddit funny rust golang --posts 0 --offline --cookies cookies.txt
 
 # paginate the whole listing, sort by top of the year, download videos too
 reddit funny --posts 0 --sort top --time year --videos --cookies cookies.txt
@@ -52,12 +56,15 @@ reddit rust --posts 0 --offline --cookies cookies.txt
 By default it saves what the listing's first page shows:
 
 - listing metadata (`<name>_about.json`) — title, description, subscribers, icon/banner
-- the first page of posts (`<name>_posts.json`, ~25 posts, full metadata)
+- the first page of posts (`<name>_posts.json`, ~25 posts, full metadata; re-runs
+  merge into it instead of replacing it)
 - the images of those posts (`media/posts/…`)
 
 Galleries are downloaded in full (every image, in order), and each gallery image
 prefers the original `i.redd.it` file with the signed preview URL as a fallback.
-Videos, pagination depth and subreddit art are opt-in / configurable.
+Videos, pagination depth and subreddit art are opt-in / configurable. Re-runs
+merge the fresh listing into the existing archive and never download media that
+is already on disk — see [Re-runs and caching](#re-runs-and-caching).
 
 ## Options
 
@@ -77,36 +84,59 @@ Videos, pagination depth and subreddit art are opt-in / configurable.
 --no-icon            skip the subreddit icon and banner
 --no-raw             skip the raw listing JSON dump
 --no-downloads       JSON only, no media
---offline            generate a self-contained index.html to browse the archive
+--offline            per-archive index.html viewer + a root archive hub
 ```
 
 Targets can be names (`funny`), reddit paths (`r/rust`, `u/spez`) or
 full URLs (`https://www.reddit.com/r/rust/top/?t=week`), including multi-subreddits
 (`r/rust+golang`). Sort/time hints embedded in a URL are used when the flags are
-not given.
+not given. Pass several targets to archive them in one run — each goes to its own
+directory under `--out-dir`.
 
 ## Output layout
 
 ```
-output/r_<name>/
-  <name>_about.json        subreddit metadata
-  <name>_posts.json        clean posts (galleries, previews, stats)
-  <name>_posts_raw.json    raw listing JSON (--no-raw to skip)
-  media_manifest.json      every downloadable file
-  media/
-    subreddit_icon.png
-    subreddit_banner.jpg
-    posts/
-      <post id>.jpg        single image post
-      <post id>_00.jpg     gallery images, in display order
-      <post id>_01.png
-      <post id>_02.mp4     gallery video / animated item (--videos)
-      <post id>.mp4        reddit-hosted video (--videos)
-  index.html               offline viewer (--offline)
+output/
+  index.html                 archive hub linking every r_*/u_* directory (--offline)
+  r_<name>/
+    <name>_about.json        subreddit metadata
+    <name>_posts.json        clean posts (galleries, previews, stats)
+    <name>_posts_raw.json    raw listing JSON of the latest run (--no-raw to skip)
+    media_manifest.json      every downloadable file
+    media/
+      subreddit_icon.png
+      subreddit_banner.jpg
+      posts/
+        <post id>.jpg        single image post
+        <post id>_00.jpg     gallery images, in display order
+        <post id>_01.png
+        <post id>_02.mp4     gallery video / animated item (--videos)
+        <post id>.mp4        reddit-hosted video (--videos)
+    index.html               offline viewer (--offline)
 ```
 
 JSON always contains the full data from the listing (all gallery children, captions,
 scores, flairs, …). Download depth is controlled by the flags above.
+
+## Re-runs and caching
+
+Archives are incremental. The media downloader checks the file system first —
+anything already in `media/` is reported as cached and never requested again, so
+re-running an archive only fetches what is new:
+
+```sh
+reddit funny --posts 0 --offline --cookies cookies.txt   # first archive
+reddit funny --posts 0 --offline --cookies cookies.txt   # media: 0 downloaded, 42 cached
+```
+
+Downloads are written to a `.part` file and renamed into place, so an interrupted
+run never leaves a truncated file that a later run would mistake for finished
+content.
+
+The fresh listing is also merged into `<name>_posts.json`: posts reddit still
+returns keep their updated scores, while previously archived posts that have
+since dropped off the listing stay in the archive (newest first). `--since`
+filters what is fetched, it does not delete stored posts.
 
 ## Offline HTML viewer
 
@@ -118,9 +148,14 @@ galleries, self posts and videos with scores and metadata.
 Downloaded files are served from `media/`; anything missing falls back to the
 original reddit CDN URL, so the page also works for `--no-downloads` runs.
 
+With `--offline`, the output root also gets an `index.html` hub that links every
+archive in the folder (with icon, post count and fetch date); each archive page
+links back to it. Archiving a second subreddit later updates the hub, so several
+archives are one click apart:
+
 ```sh
-reddit funny --posts 0 --offline --cookies cookies.txt
-# then open output/r_funny/index.html
+reddit funny rust --posts 0 --offline --cookies cookies.txt
+# then open output/index.html for both archives, or output/r_funny/index.html
 ```
 
 ## Authentication
@@ -159,8 +194,34 @@ cargo install --path .
 
 ## Docker
 
-The image is built on `alpine:3.24` and ships the musl binary — about 8 MB
-compressed (~17 MB on disk):
+Published images are on GitHub Container Registry (`linux/amd64` and
+`linux/arm64`, built on `alpine:3.24` with the musl binary — about 8 MB
+compressed, ~17 MB on disk):
+
+```sh
+docker run --rm \
+  -v "$PWD/output:/data" \
+  -v "$PWD/cookies.txt:/cookies.txt:ro" \
+  ghcr.io/reddit-rs/reddit funny --cookies /cookies.txt
+```
+
+The `latest` tag tracks the newest release; pin a version for reproducible
+archives (`ghcr.io/reddit-rs/reddit:0.2.0`). Multiple subreddits and the offline
+viewer work the same way:
+
+```sh
+docker run --rm \
+  -v "$PWD/output:/data" \
+  -v "$PWD/cookies.txt:/cookies.txt:ro" \
+  ghcr.io/reddit-rs/reddit funny rust --posts 0 --offline --cookies /cookies.txt
+```
+
+Archives land in `./output/` (the image sets `REDDIT_OUT_DIR=/data`, and the same
+variable overrides `--out-dir` anywhere). The container runs as a non-root user
+(uid 10001); if you hit a permission error on the mount, make the host directory
+writable: `chmod -R a+w output`.
+
+To build the image from source instead:
 
 ```sh
 docker build -t reddit:local .
@@ -169,11 +230,6 @@ docker run --rm \
   -v "$PWD/cookies.txt:/cookies.txt:ro" \
   reddit:local funny --cookies /cookies.txt
 ```
-
-Archives land in `./output/r_funny/` (the image sets `REDDIT_OUT_DIR=/data`, and
-the same variable overrides `--out-dir` anywhere). The container runs as a
-non-root user (uid 10001); if you hit a permission error on the mount, make the
-host directory writable: `chmod -R a+w output`.
 
 ## Library usage
 

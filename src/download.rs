@@ -1,4 +1,11 @@
 //! Parallel media downloader with caching, retries and URL fallbacks.
+//!
+//! Files already in the archive are never requested again: every manifest item
+//! is checked against the media directory before any HTTP request is made and
+//! reported as [`DownloadReport::cached`]. Successful downloads are written to
+//! a temporary `.part` file and renamed into place, so an interrupted run
+//! cannot leave a truncated file behind that a later run would mistake for
+//! cached content.
 
 use crate::clean::ext_from_url;
 use crate::models::ManifestItem;
@@ -11,6 +18,33 @@ use tokio::sync::Semaphore;
 use wreq::Client;
 use wreq::header::{HeaderMap, HeaderValue};
 use wreq_util::Emulation;
+
+/// Outcome of a media download pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DownloadReport {
+    /// Manifest items considered.
+    pub total: usize,
+    /// Files fetched over the network this run.
+    pub downloaded: usize,
+    /// Files that were already present on disk and were not requested again.
+    pub cached: usize,
+    /// Files that could not be downloaded from any candidate URL.
+    pub failed: usize,
+}
+
+impl DownloadReport {
+    /// Files that are now part of the archive (downloaded plus cached).
+    pub fn present(&self) -> usize {
+        self.downloaded + self.cached
+    }
+}
+
+/// The result of one manifest item: fetched now, or already on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Downloaded,
+    Cached,
+}
 
 /// Path of a manifest item relative to the `media/` directory
 /// (e.g. `posts/abc123_00.jpg`).
@@ -43,6 +77,21 @@ pub(crate) fn manifest_rel_path(item: &ManifestItem) -> PathBuf {
     PathBuf::from("media").join(file_name(item))
 }
 
+/// True when the item is already archived: a non-empty regular file.
+async fn is_present(path: &Path) -> bool {
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Sibling path used while a download is in flight (`<file>.part`).
+fn part_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".part");
+    PathBuf::from(s)
+}
+
 fn media_headers(ua: &str, cookie_header: Option<&str>) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if !ua.is_empty() {
@@ -61,15 +110,21 @@ fn media_headers(ua: &str, cookie_header: Option<&str>) -> Result<HeaderMap> {
     Ok(headers)
 }
 
-/// Download every manifest item into `<outdir>/media`, skipping files that
-/// already exist. Returns `(downloaded, failed)`.
+/// Download every manifest item that is not already in `<outdir>/media`.
+///
+/// Presence is checked before any request is made, so re-running an archive
+/// costs no network traffic for media it already has.
 pub async fn download_all(
     manifest: &[ManifestItem],
     outdir: &Path,
     ua: &str,
     cookie_header: Option<&str>,
     concurrency: usize,
-) -> (usize, usize) {
+) -> DownloadReport {
+    let mut report = DownloadReport {
+        total: manifest.len(),
+        ..DownloadReport::default()
+    };
     let client = Client::builder()
         .emulation(Emulation::Chrome131)
         .timeout(Duration::from_secs(120))
@@ -79,57 +134,71 @@ pub async fn download_all(
         Ok(h) => h,
         Err(e) => {
             println!("media headers invalid: {e}");
-            return (0, manifest.len());
+            report.failed = manifest.len();
+            return report;
         }
     };
     let sem = Arc::new(Semaphore::new(concurrency.max(1)));
     let meddir = outdir.join("media");
-    let mut handles = Vec::with_capacity(manifest.len());
 
+    // Check the archive before going online: items that are already on disk
+    // are never requested again.
+    let mut pending = Vec::new();
     for item in manifest {
+        if is_present(&meddir.join(file_name(item))).await {
+            report.cached += 1;
+        } else {
+            pending.push(item.clone());
+        }
+    }
+    if report.cached > 0 {
+        println!(
+            "media: {} of {} already cached, {} to fetch",
+            report.cached,
+            manifest.len(),
+            pending.len()
+        );
+    }
+
+    let total = pending.len();
+    let mut handles = Vec::with_capacity(total);
+    for item in pending {
         let client = client.clone();
         let sem = sem.clone();
         let meddir = meddir.clone();
         let headers = headers.clone();
-        let item = item.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
             download_one(&client, &item, &meddir, &headers).await
         }));
     }
 
-    let total = manifest.len();
-    let mut failed = 0usize;
     let mut done = 0usize;
     for h in handles {
+        done += 1;
         match h.await {
-            Ok(Ok(msg)) => {
-                done += 1;
-                if msg.starts_with("FAIL") {
-                    failed += 1;
-                    println!("[{done}/{total}] {msg}");
-                } else if done.is_multiple_of(25) {
-                    println!("[{done}/{total}] {msg}");
+            Ok(Ok(Outcome::Downloaded)) => {
+                report.downloaded += 1;
+                if done.is_multiple_of(25) {
+                    println!("[{done}/{total}] downloaded");
                 }
             }
+            Ok(Ok(Outcome::Cached)) => report.cached += 1,
             Ok(Err(e)) => {
-                done += 1;
-                failed += 1;
+                report.failed += 1;
                 println!("[{done}/{total}] FAIL {e}");
             }
             Err(e) => {
-                done += 1;
-                failed += 1;
+                report.failed += 1;
                 println!("[{done}/{total}] FAIL task error: {e}");
             }
         }
     }
     println!(
-        "\nmedia: {}/{} downloaded, {failed} failed",
-        total - failed,
-        total
+        "\nmedia: {} downloaded, {} cached, {} failed",
+        report.downloaded, report.cached, report.failed
     );
-    (total - failed, failed)
+    report
 }
 
 async fn download_one(
@@ -137,18 +206,14 @@ async fn download_one(
     item: &ManifestItem,
     meddir: &Path,
     headers: &HeaderMap,
-) -> Result<String> {
+) -> Result<Outcome> {
     let rel = file_name(item);
     let path = meddir.join(&rel);
+    if is_present(&path).await {
+        return Ok(Outcome::Cached);
+    }
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
-    }
-    if tokio::fs::metadata(&path)
-        .await
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
-    {
-        return Ok(format!("cached  {}", rel.display()));
     }
 
     let mut urls = vec![item.url.clone()];
@@ -177,10 +242,8 @@ async fn download_one(
                     }
                 };
                 if !bytes.is_empty() {
-                    let mut f = tokio::fs::File::create(&path).await?;
-                    f.write_all(&bytes).await?;
-                    f.flush().await?;
-                    return Ok(format!("OK      {}", rel.display()));
+                    write_atomic(&path, &bytes).await?;
+                    return Ok(Outcome::Downloaded);
                 }
             } else if status == 429 {
                 let wait = 15 * (attempt + 1);
@@ -193,7 +256,25 @@ async fn download_one(
             }
         }
     }
-    Ok(format!("FAIL    {}", rel.display()))
+    Err(anyhow::anyhow!("{}", rel.display()))
+}
+
+/// Write `bytes` to `path` via a temporary sibling, so readers (and later
+/// runs) only ever see a complete file.
+async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = part_path(path);
+    let res = async {
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        f.write_all(bytes).await?;
+        f.flush().await?;
+        drop(f);
+        tokio::fs::rename(&tmp, path).await
+    }
+    .await;
+    if res.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    Ok(res?)
 }
 
 #[cfg(test)]
@@ -261,5 +342,34 @@ mod tests {
 
         it.url = "https://example.com/download".into();
         assert_eq!(manifest_rel_path(&it), PathBuf::from("media/posts/abc.jpg"));
+    }
+
+    #[test]
+    fn part_path_is_a_sibling() {
+        assert_eq!(
+            part_path(Path::new("/a/media/posts/x.jpg")),
+            PathBuf::from("/a/media/posts/x.jpg.part")
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_requires_a_nonempty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.jpg");
+        assert!(!is_present(&path).await);
+        tokio::fs::write(&path, b"").await.unwrap();
+        assert!(!is_present(&path).await, "empty file must be re-downloaded");
+        tokio::fs::write(&path, b"x").await.unwrap();
+        assert!(is_present(&path).await);
+        assert!(!is_present(dir.path()).await, "directories are not files");
+    }
+
+    #[tokio::test]
+    async fn atomic_write_leaves_no_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.jpg");
+        write_atomic(&path, b"data").await.unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"data");
+        assert!(!part_path(&path).exists());
     }
 }
