@@ -11,14 +11,16 @@ pub mod client;
 pub mod download;
 pub mod html;
 pub mod models;
+pub mod transform;
 
+pub use crate::download::{DownloadReport, TransformOptions};
 pub use crate::models::{
     GalleryItem, ManifestItem, MediaAsset, MediaFormat, Post, Sort, SubredditInfo, Target,
     TargetKind, TimeFilter, VideoInfo,
 };
 
 use crate::client::Client;
-use crate::download::{DownloadReport, download_all};
+use crate::download::download_all;
 use anyhow::{Result, bail};
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -97,6 +99,18 @@ pub struct Config {
     /// Only download these media formats ([`MediaFormat`]; `jpeg` counts as
     /// `jpg`). Empty = every format.
     pub formats: Vec<MediaFormat>,
+    /// Skip still images whose short side is smaller than `.0` or whose long
+    /// side is smaller than `.1` (e.g. `(768, 1024)` keeps portrait images
+    /// ≥768×1024 and landscape images ≥1024×768). `None` = no floor.
+    pub min_size: Option<(u32, u32)>,
+    /// Downscale still images so neither side exceeds this `(width, height)`
+    /// box; never upscales. `None` = no cap.
+    pub max_size: Option<(u32, u32)>,
+    /// Convert JPEG/PNG/BMP stills to this format (`Jpg` or `Png`). GIF/WebP
+    /// can be animated and are kept as-is.
+    pub convert: Option<MediaFormat>,
+    /// JPEG quality for converted/resized images (1-100).
+    pub quality: u8,
     /// Max images per gallery (`0` = all).
     pub gallery_images: usize,
     /// Only keep posts created on/after this date (YYYY-MM-DD).
@@ -127,6 +141,10 @@ impl Default for Config {
             time: TimeFilter::All,
             videos: false,
             formats: Vec::new(),
+            min_size: None,
+            max_size: None,
+            convert: None,
+            quality: 85,
             gallery_images: 0,
             since: None,
             skip_icon: false,
@@ -154,6 +172,12 @@ pub struct Summary {
     pub media_cached: usize,
     /// Media files that could not be downloaded.
     pub media_failed: usize,
+    /// Downloaded files rewritten to the `--convert` format.
+    pub media_converted: usize,
+    /// Downloaded files downscaled by `--max-size`.
+    pub media_resized: usize,
+    /// Manifest items dropped by `--min-size`.
+    pub media_skipped: usize,
 }
 
 fn valid_subreddit(name: &str) -> bool {
@@ -399,6 +423,14 @@ async fn write_archive_hub(root: &Path) -> Result<usize> {
 /// optionally render the offline viewer. All network and file IO happens here.
 pub async fn run(cfg: Config) -> Result<Summary> {
     validate_target(&cfg.target)?;
+    if let Some(convert) = cfg.convert
+        && !matches!(convert, MediaFormat::Jpg | MediaFormat::Png)
+    {
+        bail!(
+            "conversion target must be jpg or png, not '{}'",
+            convert.name()
+        );
+    }
 
     let cookies: HashMap<String, String> = match &cfg.cookies {
         Some(c) => {
@@ -524,7 +556,6 @@ pub async fn run(cfg: Config) -> Result<Summary> {
         cfg.gallery_images,
         cfg.skip_icon,
     );
-    let manifest = clean::filter_manifest(manifest, &cfg.formats);
     if !cfg.formats.is_empty() {
         let formats = cfg
             .formats
@@ -533,6 +564,37 @@ pub async fn run(cfg: Config) -> Result<Summary> {
             .collect::<Vec<_>>()
             .join(", ");
         println!("formats: {formats}");
+    }
+    let manifest = clean::filter_manifest(manifest, &cfg.formats);
+    let before_min_size = manifest.len();
+    let manifest = clean::filter_manifest_min_size(manifest, cfg.min_size);
+    let skipped_small = before_min_size - manifest.len();
+    if let Some((short, long)) = cfg.min_size {
+        println!(
+            "min-size: stills need short side >= {short} and long side >= {long}; {skipped_small} skipped"
+        );
+    }
+    // Rewrite extensions before anything is fetched so file names, the
+    // manifest and the viewer agree.
+    let manifest = clean::apply_output_format(manifest, cfg.convert);
+    let transforms = TransformOptions {
+        max_size: cfg.max_size,
+        convert: cfg.convert,
+        quality: cfg.quality,
+    };
+    if cfg.convert.is_some() || cfg.max_size.is_some() {
+        let mut what = Vec::new();
+        if let Some(convert) = cfg.convert {
+            what.push(format!("convert to {}", convert.name()));
+        }
+        if let Some((width, height)) = cfg.max_size {
+            what.push(format!("max size {width}x{height}"));
+        }
+        println!(
+            "image transforms: {} (JPEG/PNG/BMP stills only, quality {})",
+            what.join(", "),
+            cfg.quality
+        );
     }
 
     let mut report = DownloadReport::default();
@@ -549,6 +611,7 @@ pub async fn run(cfg: Config) -> Result<Summary> {
             &cfg.user_agent,
             client.cookie_header(),
             8,
+            &transforms,
         )
         .await;
     } else {
@@ -591,6 +654,9 @@ pub async fn run(cfg: Config) -> Result<Summary> {
         media_downloaded: report.downloaded,
         media_cached: report.cached,
         media_failed: report.failed,
+        media_converted: report.converted,
+        media_resized: report.resized,
+        media_skipped: skipped_small,
     })
 }
 

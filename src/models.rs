@@ -57,6 +57,12 @@ impl MediaFormat {
     pub fn is_video(self) -> bool {
         matches!(self, MediaFormat::Mp4 | MediaFormat::Webm)
     }
+
+    /// True for formats that are always still images. GIF and WebP can be
+    /// animated, so they are never decoded, converted or resized.
+    pub fn is_static_image(self) -> bool {
+        matches!(self, MediaFormat::Jpg | MediaFormat::Png | MediaFormat::Bmp)
+    }
 }
 
 /// What a CLI target points at.

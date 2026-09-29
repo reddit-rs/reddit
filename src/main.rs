@@ -15,6 +15,10 @@ reddit-hosted video files.\n\n\
 Only some media containers can be kept: --formats gif downloads just the GIFs, \
 --formats jpg,jpeg keeps JPEG stills (jpg and jpeg are the same format). The listing \
 JSON still describes every post. Video formats imply --videos.\n\n\
+Image handling can be tuned too: --min-size 768x1024 skips stills below 768x1024 \
+(portrait) / 1024x768 (landscape), --max-size 1344x1792 downscales anything larger, \
+and --convert jpg normalizes JPEG/PNG/BMP stills to a single format (lossy; GIF/WebP \
+are kept as-is).\n\n\
 Several subreddits (or users) can be archived in one run; each gets its own directory \
 under the output root. Re-running a target is incremental: the fresh listing is merged \
 into the existing archive and media files already on disk are not downloaded again.\n\n\
@@ -26,6 +30,7 @@ Examples:\n  \
 reddit funny --cookies cookies.txt\n  \
 reddit funny rust --posts 0 --offline --cookies cookies.txt\n  \
 reddit gifs --formats gif --posts 0 --cookies cookies.txt\n  \
+reddit pics --min-size 768x1024 --max-size 1344x1792 --convert jpg --cookies cookies.txt\n  \
 reddit https://www.reddit.com/r/funny --sort new --posts 5 --cookies cookies.txt\n  \
 reddit u/spez --sort top --time year --gallery-images 10 --cookies cookies.txt"
 )]
@@ -79,6 +84,27 @@ struct Cli {
     )]
     formats: Vec<FormatArg>,
 
+    /// skip still images smaller than this: short side < W or long side < H
+    #[arg(long, value_parser = parse_size, value_name = "WxH")]
+    min_size: Option<(u32, u32)>,
+
+    /// downscale still images so neither side exceeds this box
+    #[arg(long, value_parser = parse_size, value_name = "WxH")]
+    max_size: Option<(u32, u32)>,
+
+    /// convert JPEG/PNG/BMP stills to this format (gif/webp are kept as-is)
+    #[arg(long, value_enum, ignore_case = true, value_name = "FORMAT")]
+    convert: Option<ConvertArg>,
+
+    /// JPEG quality for converted/resized images (1-100)
+    #[arg(
+        long,
+        default_value_t = 85,
+        value_parser = clap::value_parser!(u8).range(1..=100),
+        value_name = "N"
+    )]
+    quality: u8,
+
     /// max images per gallery (0 = all)
     #[arg(long, default_value_t = 0, value_name = "N")]
     gallery_images: usize,
@@ -131,6 +157,39 @@ impl From<FormatArg> for MediaFormat {
             FormatArg::Webm => MediaFormat::Webm,
         }
     }
+}
+
+/// Conversion targets; GIF/WebP are excluded because they may be animated.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ConvertArg {
+    /// JPEG (`jpeg` is accepted too; transparency is flattened onto white)
+    #[value(alias = "jpeg")]
+    Jpg,
+    Png,
+}
+
+impl From<ConvertArg> for MediaFormat {
+    fn from(c: ConvertArg) -> Self {
+        match c {
+            ConvertArg::Jpg => MediaFormat::Jpg,
+            ConvertArg::Png => MediaFormat::Png,
+        }
+    }
+}
+
+/// `WxH` with both sides greater than zero.
+fn parse_size(s: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("invalid size '{s}': expected WxH, e.g. 768x1024");
+    let split = s.find(['x', 'X']).ok_or_else(bad)?;
+    let (w, h) = (&s[..split], &s[split + 1..]);
+    let w: u32 = w.trim().parse().map_err(|_| bad())?;
+    let h: u32 = h.trim().parse().map_err(|_| bad())?;
+    if w == 0 || h == 0 {
+        return Err(format!(
+            "invalid size '{s}': sides must be greater than zero"
+        ));
+    }
+    Ok((w, h))
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -236,6 +295,10 @@ async fn main() -> Result<()> {
             time,
             videos: cli.videos,
             formats: formats.clone(),
+            min_size: cli.min_size,
+            max_size: cli.max_size,
+            convert: cli.convert.map(MediaFormat::from),
+            quality: cli.quality,
             gallery_images: cli.gallery_images,
             since: cli.since.clone(),
             skip_icon: cli.no_icon,
@@ -264,11 +327,28 @@ async fn main() -> Result<()> {
     }
 
     let total = |f: fn(&reddit::Summary) -> usize| summaries.iter().map(f).sum::<usize>();
-    println!(
-        "\ndone — {} posts ({} new) | media: {} downloaded, {} cached, {} failed",
+    let (posts, new, downloaded) = (
         total(|s| s.posts),
         total(|s| s.posts_new),
         total(|s| s.media_downloaded),
+    );
+    let mut notes = Vec::new();
+    for (count, label) in [
+        (total(|s| s.media_converted), "converted"),
+        (total(|s| s.media_resized), "resized"),
+        (total(|s| s.media_skipped), "skipped small"),
+    ] {
+        if count > 0 {
+            notes.push(format!("{count} {label}"));
+        }
+    }
+    let notes = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", notes.join(", "))
+    };
+    println!(
+        "\ndone — {posts} posts ({new} new) | media: {downloaded} downloaded, {} cached, {} failed{notes}",
         total(|s| s.media_cached),
         total(|s| s.media_failed),
     );

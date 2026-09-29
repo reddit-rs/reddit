@@ -41,6 +41,9 @@ reddit funny --sort new --posts 5 --cookies cookies.txt
 # only animated GIFs (other formats are not downloaded)
 reddit gifs --formats gif --posts 0 --cookies cookies.txt
 
+# keep only decent-sized stills, normalized to JPEG and capped at 1344x1792
+reddit pics --min-size 768x1024 --max-size 1344x1792 --convert jpg --cookies cookies.txt
+
 # several subreddits in one run, each in its own output directory
 reddit funny rust golang --posts 0 --offline --cookies cookies.txt
 
@@ -80,6 +83,11 @@ is already on disk — see [Re-runs and caching](#re-runs-and-caching).
                       files are silent)
 --formats LIST       only download these formats, e.g. 'gif' or 'jpg,jpeg,png'
                       (repeatable/comma-separated; mp4/webm imply --videos)
+--min-size WxH       skip still images below WxH: short side < W or long side < H
+--max-size WxH       downscale still images so neither side exceeds WxH (never upscales)
+--convert FORMAT     convert JPEG/PNG/BMP stills to 'jpg' or 'png' (gif/webp are
+                      kept as-is; transparency is flattened onto white)
+--quality N          JPEG quality for converted/resized images (1-100, default 85)
 --gallery-images N   max images per gallery (0 = all)
 --since DATE         only posts created on/after YYYY-MM-DD
 --cookies STR|FILE   'k=v; k2=v2' or a Netscape cookies.txt path (recommended;
@@ -118,6 +126,31 @@ whose format cannot be determined is skipped rather than guessed at.
 The listing JSON still describes every post; filtered-out files are simply not
 downloaded, the offline viewer falls back to the original reddit URL for them
 (or hides the gallery item), and files already in `media/` are never deleted.
+
+### Image size and normalization
+
+`--min-size` drops still images below a floor **before anything is downloaded**
+(reddit reports the dimensions): the short side must be at least `W` and the
+long side at least `H`, so `--min-size 768x1024` keeps portrait images at least
+768×1024 and landscape images at least 1024×768. Images whose size reddit does
+not report are kept, and videos / subreddit art are never filtered.
+
+`--max-size` and `--convert` are opt-in, lossy transforms applied while saving:
+
+```sh
+reddit pics --min-size 768x1024 --max-size 1344x1792 --convert jpg --cookies cookies.txt
+```
+
+- only JPEG/PNG/BMP stills are transformed — GIF and WebP may be animated and
+  are stored untouched, as are videos and subreddit art;
+- images that already match the requested format and fit the box are stored
+  byte-for-byte, so nothing is re-encoded without a reason;
+- `--max-size` only ever downscales, preserving the aspect ratio;
+- converting to JPEG flattens transparency onto white and `--quality` sets the
+  JPEG quality (default 85);
+- transforms apply to newly downloaded files only — files already in `media/`
+  are never rewritten, so an archive keeps whatever it was originally built
+  with. The converted files are the archive: originals are not kept.
 
 ## Output layout
 
@@ -232,8 +265,8 @@ docker run --rm \
 ```
 
 The `latest` tag tracks the newest release; pin a version for reproducible
-archives (`ghcr.io/reddit-rs/reddit:0.3.0`). Multiple subreddits, format
-filtering and the offline viewer work the same way:
+archives (`ghcr.io/reddit-rs/reddit:0.4.0`). Multiple subreddits, format
+filtering, image transforms and the offline viewer work the same way:
 
 ```sh
 docker run --rm \
@@ -244,7 +277,8 @@ docker run --rm \
 docker run --rm \
   -v "$PWD/output:/data" \
   -v "$PWD/cookies.txt:/cookies.txt:ro" \
-  ghcr.io/reddit-rs/reddit gifs --formats gif --cookies /cookies.txt
+  ghcr.io/reddit-rs/reddit pics --min-size 768x1024 --max-size 1344x1792 \
+  --convert jpg --cookies /cookies.txt
 ```
 
 Archives land in `./output/` (the image sets `REDDIT_OUT_DIR=/data`, and the same
@@ -291,9 +325,10 @@ cargo fmt --all -- --check
 git config core.hooksPath .githooks
 ```
 
-Unit tests cover target/cookie parsing, post and gallery cleaning and manifest
-building; integration tests run the whole pipeline against a mocked reddit API
-(wiremock) — no network access required.
+Unit tests cover target/cookie parsing, post and gallery cleaning, manifest
+building, format/size filtering and image transforms; integration tests run the
+whole pipeline against a mocked reddit API (wiremock) — no network access
+required.
 
 ## Project layout
 
@@ -305,6 +340,7 @@ src/
   clean.rs      raw API JSON -> clean models, manifest builder, cookie parsing
   models.rs     data structures
   download.rs   parallel media downloader (caching, retries, URL fallbacks)
+  transform.rs  optional image convert/resize (--convert, --max-size)
   html.rs       self-contained offline viewer
 tests/
   integration.rs  end-to-end tests against a mocked API

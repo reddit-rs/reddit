@@ -8,7 +8,7 @@
 //! cached content.
 
 use crate::clean::{ext_from_url, format_from_mime, item_format};
-use crate::models::ManifestItem;
+use crate::models::{ManifestItem, MediaFormat};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +30,10 @@ pub struct DownloadReport {
     pub cached: usize,
     /// Files that could not be downloaded from any candidate URL.
     pub failed: usize,
+    /// Downloaded files whose container format was rewritten (`--convert`).
+    pub converted: usize,
+    /// Downloaded files whose pixel dimensions were reduced (`--max-size`).
+    pub resized: usize,
 }
 
 impl DownloadReport {
@@ -39,10 +43,22 @@ impl DownloadReport {
     }
 }
 
+/// Opt-in, lossy image transforms applied while saving (see `--convert` and
+/// `--max-size`). Files already on disk are never rewritten.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransformOptions {
+    /// Downscale images so neither side exceeds this `(width, height)` box.
+    pub max_size: Option<(u32, u32)>,
+    /// Rewrite JPEG/PNG/BMP stills as this format.
+    pub convert: Option<MediaFormat>,
+    /// JPEG quality (1-100).
+    pub quality: u8,
+}
+
 /// The result of one manifest item: fetched now, or already on disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
-    Downloaded,
+    Downloaded { converted: bool, resized: bool },
     Cached,
 }
 
@@ -121,6 +137,7 @@ pub async fn download_all(
     ua: &str,
     cookie_header: Option<&str>,
     concurrency: usize,
+    transforms: &TransformOptions,
 ) -> DownloadReport {
     let mut report = DownloadReport {
         total: manifest.len(),
@@ -168,9 +185,10 @@ pub async fn download_all(
         let sem = sem.clone();
         let meddir = meddir.clone();
         let headers = headers.clone();
+        let transforms = *transforms;
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
-            download_one(&client, &item, &meddir, &headers).await
+            download_one(&client, &item, &meddir, &headers, &transforms).await
         }));
     }
 
@@ -178,8 +196,10 @@ pub async fn download_all(
     for h in handles {
         done += 1;
         match h.await {
-            Ok(Ok(Outcome::Downloaded)) => {
+            Ok(Ok(Outcome::Downloaded { converted, resized })) => {
                 report.downloaded += 1;
+                report.converted += usize::from(converted);
+                report.resized += usize::from(resized);
                 if done.is_multiple_of(25) {
                     println!("[{done}/{total}] downloaded");
                 }
@@ -195,8 +215,20 @@ pub async fn download_all(
             }
         }
     }
+    let mut extra = Vec::new();
+    if report.converted > 0 {
+        extra.push(format!("{} converted", report.converted));
+    }
+    if report.resized > 0 {
+        extra.push(format!("{} resized", report.resized));
+    }
+    let extra = if extra.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", extra.join(", "))
+    };
     println!(
-        "\nmedia: {} downloaded, {} cached, {} failed",
+        "\nmedia: {} downloaded{extra}, {} cached, {} failed",
         report.downloaded, report.cached, report.failed
     );
     report
@@ -207,6 +239,7 @@ async fn download_one(
     item: &ManifestItem,
     meddir: &Path,
     headers: &HeaderMap,
+    transforms: &TransformOptions,
 ) -> Result<Outcome> {
     let rel = file_name(item);
     let path = meddir.join(&rel);
@@ -223,6 +256,9 @@ async fn download_one(
     {
         urls.push(f.clone());
     }
+    // When the file will be re-encoded, the server's content type says nothing
+    // about the final format and must not be checked against it.
+    let converting = transforms.convert.is_some() && crate::clean::is_post_still(item);
 
     for url in urls {
         for attempt in 0..3 {
@@ -238,7 +274,7 @@ async fn download_one(
                 // Never store a fallback of the wrong format under this file
                 // name (e.g. a jpg preview saved as `.gif`). Unknown content
                 // types are accepted; only known mismatches are rejected.
-                if let Some(expected) = item_format(item) {
+                if !converting && let Some(expected) = item_format(item) {
                     let actual = resp
                         .headers()
                         .get(wreq::header::CONTENT_TYPE)
@@ -264,8 +300,32 @@ async fn download_one(
                     }
                 };
                 if !bytes.is_empty() {
-                    write_atomic(&path, &bytes).await?;
-                    return Ok(Outcome::Downloaded);
+                    // Optional lossy transforms (convert / downscale). A
+                    // failure here is reported instead of writing content
+                    // that would not match its file name.
+                    match crate::transform::apply(&bytes, item, transforms) {
+                        Ok(crate::transform::Applied::Unchanged) => {
+                            write_atomic(&path, &bytes).await?;
+                            return Ok(Outcome::Downloaded {
+                                converted: false,
+                                resized: false,
+                            });
+                        }
+                        Ok(crate::transform::Applied::Transformed {
+                            bytes: out,
+                            converted,
+                            resized,
+                        }) => {
+                            write_atomic(&path, &out).await?;
+                            return Ok(Outcome::Downloaded { converted, resized });
+                        }
+                        Err(e) => {
+                            return Err(e.context(format!(
+                                "transforming {} (download happened; file not saved)",
+                                rel.display()
+                            )));
+                        }
+                    }
                 }
             } else if status == 429 {
                 let wait = 15 * (attempt + 1);

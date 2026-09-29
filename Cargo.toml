@@ -1,6 +1,6 @@
 [package]
 name = "reddit"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Reddit offline viewer: save a subreddit's posts, images and galleries as JSON + media"
@@ -22,6 +22,7 @@ clap = { version = "4", features = ["derive", "env"] }
 chrono = "0.4"
 anyhow = "1"
 regex = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp"] }
 
 [dev-dependencies]
 wiremock = "0.6"

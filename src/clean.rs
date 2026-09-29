@@ -462,6 +462,68 @@ pub fn filter_manifest(manifest: Vec<ManifestItem>, wanted: &[MediaFormat]) -> V
         .collect()
 }
 
+/// True for post media that is an image (not a video, not subreddit art).
+pub(crate) fn is_post_still(item: &ManifestItem) -> bool {
+    item.folder == "posts" && matches!(item.kind.as_str(), "image" | "gallery" | "thumb" | "cover")
+}
+
+/// Keep still images large enough for `--min-size`: the short side must be at
+/// least `min.0` and the long side at least `min.1`, so `768x1024` keeps
+/// portrait images ≥768×1024 and landscape images ≥1024×768. Images whose
+/// dimensions are unknown are kept, and videos / subreddit art are never
+/// filtered.
+pub fn filter_manifest_min_size(
+    manifest: Vec<ManifestItem>,
+    min: Option<(u32, u32)>,
+) -> Vec<ManifestItem> {
+    let Some((min_short, min_long)) = min else {
+        return manifest;
+    };
+    manifest
+        .into_iter()
+        .filter(|item| {
+            if !is_post_still(item) {
+                return true;
+            }
+            let (Some(width), Some(height)) = (item.width, item.height) else {
+                return true;
+            };
+            if width <= 0 || height <= 0 {
+                return true;
+            }
+            let short = width.min(height) as u32;
+            let long = width.max(height) as u32;
+            short >= min_short && long >= min_long
+        })
+        .collect()
+}
+
+/// Rewrite the extension of still images that `--convert` will transcode, so
+/// file names, `media_manifest.json` and the viewer agree before anything is
+/// fetched. GIF/WebP can be animated and are never converted; videos and
+/// subreddit art are untouched.
+pub fn apply_output_format(
+    manifest: Vec<ManifestItem>,
+    convert: Option<MediaFormat>,
+) -> Vec<ManifestItem> {
+    let Some(target) = convert.filter(|f| matches!(f, MediaFormat::Jpg | MediaFormat::Png)) else {
+        return manifest;
+    };
+    manifest
+        .into_iter()
+        .map(|mut item| {
+            if is_post_still(&item)
+                && let Some(source) = item_format(&item)
+                && source.is_static_image()
+                && source != target
+            {
+                item.ext = Some(target.name().to_string());
+            }
+            item
+        })
+        .collect()
+}
+
 /// Replace characters that are awkward in file names and trim to `maxlen`.
 pub fn sanitize_filename(s: &str, maxlen: usize) -> String {
     let cleaned: String = s
@@ -822,5 +884,101 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].ext.as_deref(), Some("jpg"));
         assert_eq!(item_format(&m[0]), Some(MediaFormat::Jpg));
+    }
+
+    fn sized(kind: &str, id: &str, w: Option<i64>, h: Option<i64>) -> ManifestItem {
+        ManifestItem {
+            folder: "posts".into(),
+            id: id.into(),
+            kind: kind.into(),
+            url: format!("https://i.redd.it/{id}.jpg"),
+            fallback: None,
+            ext: Some("jpg".into()),
+            index: None,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn min_size_keeps_portrait_and_landscape_above_the_floor() {
+        let mut video = sized("video", "clip", Some(720), Some(1280));
+        let mut art = sized("icon", "subreddit", Some(256), Some(256));
+        art.folder = String::new();
+        video.folder = "posts".into();
+
+        let manifest = vec![
+            sized("image", "portrait_floor", Some(768), Some(1024)),
+            sized("image", "portrait_narrow", Some(700), Some(1200)),
+            sized("image", "portrait_short", Some(800), Some(900)),
+            sized("image", "landscape_floor", Some(1024), Some(768)),
+            sized("image", "landscape_short", Some(1200), Some(700)),
+            sized("image", "square", Some(1000), Some(1000)),
+            sized("image", "unknown", None, None),
+            video,
+            art,
+        ];
+
+        let kept: Vec<String> = filter_manifest_min_size(manifest, Some((768, 1024)))
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                "portrait_floor",
+                "landscape_floor",
+                "unknown",
+                "clip",
+                "subreddit"
+            ]
+        );
+    }
+
+    #[test]
+    fn min_size_none_keeps_everything() {
+        let manifest = vec![sized("image", "tiny", Some(1), Some(1))];
+        assert_eq!(filter_manifest_min_size(manifest, None).len(), 1);
+    }
+
+    #[test]
+    fn output_format_rewrites_only_safe_stills() {
+        let manifest = vec![
+            sized("image", "a_png", Some(1), Some(1)),
+            sized("image", "b_jpg", Some(1), Some(1)),
+            sized("image", "c_gif", Some(1), Some(1)),
+            sized("image", "d_webp", Some(1), Some(1)),
+            sized("video", "e_mp4", None, None),
+        ];
+        let mut manifest: Vec<ManifestItem> = manifest
+            .into_iter()
+            .map(|mut i| {
+                i.ext = Some(i.id.split('_').nth(1).unwrap().to_string());
+                i
+            })
+            .collect();
+        manifest[1].ext = Some("jpeg".into());
+
+        let converted = apply_output_format(manifest, Some(MediaFormat::Jpg));
+        let exts: Vec<(&str, Option<&str>)> = converted
+            .iter()
+            .map(|i| (i.id.as_str(), i.ext.as_deref()))
+            .collect();
+        assert_eq!(
+            exts,
+            vec![
+                ("a_png", Some("jpg")),
+                ("b_jpg", Some("jpeg")), // already jpeg: no rewrite
+                ("c_gif", Some("gif")),  // may be animated
+                ("d_webp", Some("webp")),
+                ("e_mp4", Some("mp4")),
+            ]
+        );
+
+        // no conversion requested / unsupported target: untouched
+        let untouched = apply_output_format(converted.clone(), None);
+        assert!(untouched.iter().all(|i| i.ext.is_some()));
+        let ignored = apply_output_format(converted, Some(MediaFormat::Webp));
+        assert_eq!(ignored[0].ext.as_deref(), Some("jpg"));
     }
 }

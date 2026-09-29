@@ -377,6 +377,100 @@ async fn mount_gifs_api(server: &MockServer, uri: &str, broken_gif: bool) {
     }
 }
 
+/// A subreddit with one oversized PNG and one small JPEG, used by the
+/// conversion/resize tests.
+fn imaging_page(server_uri: &str) -> Value {
+    let post = |id: &str, file: &str, w: i64, h: i64| {
+        json!({
+            "id": id,
+            "name": format!("t3_{id}"),
+            "title": format!("Post {id}"),
+            "author": "poster",
+            "subreddit": "imaging",
+            "permalink": format!("/r/imaging/comments/{id}/post/"),
+            "url": format!("{server_uri}{file}"),
+            "domain": "i.redd.it",
+            "post_hint": "image",
+            "created_utc": 1700300000.0,
+            "preview": {"images": [{"source": {
+                "url": format!("{server_uri}/prev/{id}.jpg"),
+                "width": w, "height": h
+            }}]}
+        })
+    };
+    json!({
+        "kind": "Listing",
+        "data": {
+            "after": null,
+            "children": [
+                {"kind": "t3", "data": post("big1", "/i/big.png", 2000, 1000)},
+                {"kind": "t3", "data": post("small1", "/i/small.jpg", 300, 200)}
+            ]
+        }
+    })
+}
+
+fn png_image(w: u32, h: u32) -> Vec<u8> {
+    let mut img = image::RgbaImage::new(w, h);
+    for (x, _, p) in img.enumerate_pixels_mut() {
+        *p = image::Rgba([(x % 255) as u8, 40, 200, 255]);
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+fn jpeg_image(w: u32, h: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    image::DynamicImage::new_rgb8(w, h)
+        .write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    out
+}
+
+/// Mounts `/r/imaging/*` plus real PNG/JPEG media.
+async fn mount_imaging_api(server: &MockServer, uri: &str) {
+    Mock::given(method("GET"))
+        .and(path("/r/imaging/about.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "t5",
+            "data": {"display_name": "imaging", "title": "Imaging", "subscribers": 5, "over18": false}
+        })))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/r/imaging/hot.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(imaging_page(uri)))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/i/big.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(png_image(2000, 1000)),
+        )
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/i/small.jpg"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/jpeg")
+                .set_body_bytes(jpeg_image(300, 200)),
+        )
+        .mount(server)
+        .await;
+}
+
 fn base_cfg(server_uri: &str, outdir: &std::path::Path) -> Config {
     Config {
         target: Target::subreddit("testsub"),
@@ -388,6 +482,10 @@ fn base_cfg(server_uri: &str, outdir: &std::path::Path) -> Config {
         time: reddit::TimeFilter::All,
         videos: false,
         formats: Vec::new(),
+        min_size: None,
+        max_size: None,
+        convert: None,
+        quality: 85,
         gallery_images: 0,
         since: None,
         skip_icon: false,
@@ -926,6 +1024,94 @@ async fn formats_video_implies_videos() {
     assert!(media.join("posts/g1_02.mp4").exists());
     assert!(media.join("posts/v1.mp4").exists());
     assert!(!media.join("posts/i1.jpeg").exists());
+}
+
+#[tokio::test]
+async fn min_size_skips_small_stills() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    let dir = tempdir().unwrap();
+
+    let mut cfg = base_cfg(&uri, dir.path());
+    cfg.min_size = Some((768, 1024));
+    let summary = run_cfg(cfg).await;
+
+    // icon + banner + m0 (800x1200) + i1 (1080x1080) survive;
+    // m1 (640x640), m2 (500x500) and the v1 preview (720x1280) are too small
+    assert_eq!(summary.media_total, 4);
+    assert_eq!(summary.media_downloaded, 4);
+    assert_eq!(summary.media_skipped, 3);
+    assert_eq!(summary.media_failed, 0);
+
+    let media = outdir(dir.path(), "r_testsub").join("media");
+    assert!(media.join("posts/g1_00.jpg").exists());
+    assert!(media.join("posts/i1.jpeg").exists());
+    assert!(!media.join("posts/g1_01.png").exists());
+    assert!(!media.join("posts/g1_02.png").exists());
+    assert!(!media.join("posts/v1.jpg").exists());
+}
+
+#[tokio::test]
+async fn convert_and_resize_rewrite_new_downloads() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    mount_imaging_api(&server, &uri).await;
+    let dir = tempdir().unwrap();
+
+    let mut cfg = base_cfg(&uri, dir.path());
+    cfg.target = Target::subreddit("imaging");
+    cfg.convert = Some(MediaFormat::Jpg);
+    cfg.max_size = Some((1344, 1792));
+    let summary = run_cfg(cfg).await;
+
+    assert_eq!(summary.media_total, 2);
+    assert_eq!(summary.media_downloaded, 2);
+    assert_eq!(summary.media_converted, 1);
+    assert_eq!(summary.media_resized, 1);
+    assert_eq!(summary.media_failed, 0);
+
+    let media = outdir(dir.path(), "r_imaging").join("media");
+    assert!(!media.join("posts/big1.png").exists());
+    let big =
+        image::load_from_memory(&std::fs::read(media.join("posts/big1.jpg")).unwrap()).unwrap();
+    assert_eq!((big.width(), big.height()), (1344, 672));
+
+    // already JPEG and within the box: stored byte-for-byte (no re-encode)
+    assert_eq!(
+        std::fs::read(media.join("posts/small1.jpg")).unwrap(),
+        jpeg_image(300, 200)
+    );
+}
+
+#[tokio::test]
+async fn convert_keeps_gifs_untouched() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    mount_api(&server, &uri).await;
+    mount_gifs_api(&server, &uri, false).await;
+    let dir = tempdir().unwrap();
+
+    let mut cfg = base_cfg(&uri, dir.path());
+    cfg.target = Target::subreddit("gifs");
+    cfg.formats = vec![MediaFormat::Gif];
+    cfg.convert = Some(MediaFormat::Jpg);
+    cfg.max_size = Some((10, 10));
+    let summary = run_cfg(cfg).await;
+
+    assert_eq!(summary.media_total, 1);
+    assert_eq!(summary.media_downloaded, 1);
+    assert_eq!(summary.media_converted, 0);
+    assert_eq!(summary.media_resized, 0);
+
+    let media = outdir(dir.path(), "r_gifs").join("media");
+    assert!(media.join("posts/a1.gif").exists());
+    assert!(!media.join("posts/a1.jpg").exists());
+    assert_eq!(
+        std::fs::read(media.join("posts/a1.gif")).unwrap(),
+        b"FAKE-/i/animated.gif"
+    );
 }
 
 #[tokio::test]
