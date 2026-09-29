@@ -41,15 +41,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint release source
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Test release source
-        run: cargo test --all-targets --all-features
+        run: cargo test --all-targets --all-features --locked
       - name: Build Rustdoc
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --all-features --locked
       - name: Verify package contents and compilation
-        run: cargo publish --dry-run
+        run: cargo publish --dry-run --locked
       - name: Publish to crates.io
         if: github.event_name == 'release' && !github.event.release.prerelease
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: cargo publish --locked

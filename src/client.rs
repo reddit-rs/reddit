@@ -63,7 +63,7 @@ impl Client {
         })
     }
 
-    /// Cookie header sent with API and media requests (never logged).
+    /// Session header for API requests and trusted Reddit media URLs (never logged).
     pub fn cookie_header(&self) -> Option<&str> {
         self.cookie_header.as_deref()
     }
@@ -82,8 +82,9 @@ impl Client {
             h.insert("Referer", v);
         }
         if let Some(c) = &self.cookie_header
-            && let Ok(v) = HeaderValue::from_str(c)
+            && let Ok(mut v) = HeaderValue::from_str(c)
         {
+            v.set_sensitive(true);
             h.insert("Cookie", v);
         }
         h
@@ -126,12 +127,14 @@ impl Client {
                 ),
                 404 => bail!("HTTP 404 for {path}: not found"),
                 429 => {
+                    last_err = anyhow::anyhow!("HTTP 429 for {path}: rate limited");
                     let wait = 15 * (attempt + 1);
                     println!("  rate limited (429), waiting {wait}s...");
                     tokio::time::sleep(Duration::from_secs(wait)).await;
                     continue;
                 }
                 500..=599 => {
+                    last_err = anyhow::anyhow!("HTTP {} for {path}", resp.status());
                     tokio::time::sleep(Duration::from_secs(2 * (attempt + 1))).await;
                     continue;
                 }

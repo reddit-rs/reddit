@@ -694,17 +694,9 @@ async fn cookies_and_user_agent_are_sent() {
         UA
     );
 
-    // media downloads carry the session too
+    // Media on non-Reddit origins must not receive the session.
     let media_req = reqs.iter().find(|r| r.url.path() == "/m0.jpg").unwrap();
-    assert!(
-        media_req
-            .headers
-            .get("cookie")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .contains("reddit_session=secret")
-    );
+    assert!(media_req.headers.get("cookie").is_none());
 }
 
 #[tokio::test]

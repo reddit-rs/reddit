@@ -353,7 +353,13 @@ fn video_item(id: &str, index: Option<usize>, v: &VideoInfo) -> ManifestItem {
         kind: "video".into(),
         url: v.url.clone(),
         fallback: None,
-        ext: Some("mp4".into()),
+        ext: Some(
+            format_from_url(&v.url)
+                .filter(|f| f.is_video())
+                .unwrap_or(MediaFormat::Mp4)
+                .name()
+                .into(),
+        ),
         index,
         width: v.width,
         height: v.height,
@@ -549,7 +555,8 @@ pub fn sanitize_filename(s: &str, maxlen: usize) -> String {
 
 /// Parse `'k=v; k2=v2'` or a Netscape `cookies.txt` file. `#HttpOnly_` lines
 /// (used by browsers for session cookies such as `reddit_session`) are read as
-/// regular cookies instead of being skipped as comments.
+/// regular cookies instead of being skipped as comments. File exports are
+/// restricted to reddit.com and its subdomains.
 pub fn parse_cookies(arg: &str) -> HashMap<String, String> {
     let mut cookies = HashMap::new();
     if Path::new(arg).is_file() {
@@ -561,7 +568,10 @@ pub fn parse_cookies(arg: &str) -> HashMap<String, String> {
                     continue;
                 }
                 let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 7 {
+                if parts.len() >= 7 && {
+                    let domain = parts[0].trim_start_matches('.').to_ascii_lowercase();
+                    domain == "reddit.com" || domain.ends_with(".reddit.com")
+                } {
                     cookies.insert(parts[5].to_string(), parts[6].to_string());
                 }
             }
@@ -634,7 +644,9 @@ mod tests {
             &p,
             "# Netscape HTTP Cookie File\n\
              #HttpOnly_.reddit.com\tTRUE\t/\tTRUE\t0\treddit_session\tSID\n\
-             .reddit.com\tTRUE\t/\tFALSE\t0\tcsrf_token\tTOK\n",
+             .reddit.com\tTRUE\t/\tFALSE\t0\tcsrf_token\tTOK\n\
+             .example.org\tTRUE\t/\tTRUE\t0\tunrelated_session\tPRIVATE\n\
+             .reddit.com.example.org\tTRUE\t/\tTRUE\t0\tcsrf_token\tWRONG\n",
         )
         .unwrap();
         let c = parse_cookies(p.to_str().unwrap());
@@ -656,6 +668,26 @@ mod tests {
         assert_eq!(ext_from_url("https://example.com/noext"), None);
         assert!(is_image_url("https://preview.redd.it/a.webp?s=1"));
         assert!(!is_image_url("https://v.redd.it/a.mp4"));
+    }
+
+    #[test]
+    fn video_manifest_preserves_known_containers() {
+        for (url, extension) in [
+            ("https://v.redd.it/id/video.mp4", "mp4"),
+            ("https://example.org/video.webm", "webm"),
+            ("https://v.redd.it/id/download", "mp4"),
+        ] {
+            let video = VideoInfo {
+                url: url.into(),
+                width: None,
+                height: None,
+                duration: None,
+            };
+            assert_eq!(
+                video_item("id", None, &video).ext.as_deref(),
+                Some(extension)
+            );
+        }
     }
 
     #[test]

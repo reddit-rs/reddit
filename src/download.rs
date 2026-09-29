@@ -9,11 +9,11 @@
 
 use crate::clean::{ext_from_url, format_from_mime, item_format};
 use crate::models::{ManifestItem, MediaFormat};
+use crate::storage::write_atomic;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use wreq::Client;
 use wreq::header::{HeaderMap, HeaderValue};
@@ -45,7 +45,7 @@ impl DownloadReport {
 
 /// Opt-in, lossy image transforms applied while saving (see `--convert` and
 /// `--max-size`). Files already on disk are never rewritten.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransformOptions {
     /// Downscale images so neither side exceeds this `(width, height)` box.
     pub max_size: Option<(u32, u32)>,
@@ -53,6 +53,16 @@ pub struct TransformOptions {
     pub convert: Option<MediaFormat>,
     /// JPEG quality (1-100).
     pub quality: u8,
+}
+
+impl Default for TransformOptions {
+    fn default() -> Self {
+        Self {
+            max_size: None,
+            convert: None,
+            quality: 85,
+        }
+    }
 }
 
 /// The result of one manifest item: fetched now, or already on disk.
@@ -70,14 +80,10 @@ fn file_name(item: &ManifestItem) -> PathBuf {
         .clone()
         .or_else(|| crate::clean::format_from_query(&item.url).map(|f| f.name().to_string()))
         .or_else(|| ext_from_url(&item.url))
-        .unwrap_or_else(|| "jpg".to_string());
+        .unwrap_or_else(|| if item.kind == "video" { "mp4" } else { "jpg" }.to_string());
     let name = match item.kind.as_str() {
         "icon" => format!("subreddit_icon.{ext}"),
         "banner" => format!("subreddit_banner.{ext}"),
-        "video" => match item.index {
-            Some(i) => format!("{}_{i:02}.mp4", item.id),
-            None => format!("{}.mp4", item.id),
-        },
         "thumb" => format!("{}_thumb.{ext}", item.id),
         "cover" => format!("{}_cover.{ext}", item.id),
         _ => match item.index {
@@ -102,13 +108,6 @@ async fn is_present(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Sibling path used while a download is in flight (`<file>.part`).
-fn part_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(".part");
-    PathBuf::from(s)
-}
-
 fn media_headers(ua: &str, cookie_header: Option<&str>) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if !ua.is_empty() {
@@ -120,11 +119,28 @@ fn media_headers(ua: &str, cookie_header: Option<&str>) -> Result<HeaderMap> {
         HeaderValue::from_static("https://www.reddit.com/"),
     );
     if let Some(c) = cookie_header
-        && let Ok(v) = HeaderValue::from_str(c)
+        && let Ok(mut v) = HeaderValue::from_str(c)
     {
+        v.set_sensitive(true);
         headers.insert("Cookie", v);
     }
     Ok(headers)
+}
+
+// Session cookies belong to reddit.com, not arbitrary post links or CDN hosts.
+fn request_headers(headers: &HeaderMap, url: &str) -> HeaderMap {
+    let mut headers = headers.clone();
+    let trusted = url.parse::<wreq::Uri>().ok().is_some_and(|uri| {
+        uri.scheme_str() == Some("https")
+            && uri.host().is_some_and(|host| {
+                let host = host.to_ascii_lowercase();
+                host == "reddit.com" || host.ends_with(".reddit.com")
+            })
+    });
+    if !trusted {
+        headers.remove(wreq::header::COOKIE);
+    }
+    headers
 }
 
 /// Download every manifest item that is not already in `<outdir>/media`.
@@ -143,11 +159,18 @@ pub async fn download_all(
         total: manifest.len(),
         ..DownloadReport::default()
     };
-    let client = Client::builder()
+    let client = match Client::builder()
         .emulation(Emulation::Chrome131)
         .timeout(Duration::from_secs(120))
         .build()
-        .expect("failed to build download client");
+    {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("failed to build download client: {e}");
+            report.failed = manifest.len();
+            return report;
+        }
+    };
     let headers = match media_headers(ua, cookie_header) {
         Ok(h) => h,
         Err(e) => {
@@ -262,7 +285,12 @@ async fn download_one(
 
     for url in urls {
         for attempt in 0..3 {
-            let resp = match client.get(&url).headers(headers.clone()).send().await {
+            let resp = match client
+                .get(&url)
+                .headers(request_headers(headers, &url))
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(_) => {
                     tokio::time::sleep(Duration::from_secs(2 * (attempt + 1))).await;
@@ -341,27 +369,10 @@ async fn download_one(
     Err(anyhow::anyhow!("{}", rel.display()))
 }
 
-/// Write `bytes` to `path` via a temporary sibling, so readers (and later
-/// runs) only ever see a complete file.
-async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = part_path(path);
-    let res = async {
-        let mut f = tokio::fs::File::create(&tmp).await?;
-        f.write_all(bytes).await?;
-        f.flush().await?;
-        drop(f);
-        tokio::fs::rename(&tmp, path).await
-    }
-    .await;
-    if res.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    Ok(res?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::part_path;
 
     fn item(kind: &str, id: &str, index: Option<usize>) -> ManifestItem {
         ManifestItem {
@@ -379,6 +390,12 @@ mod tests {
 
     #[test]
     fn file_names_cover_all_kinds() {
+        let mut video = item("video", "webm", None);
+        video.ext = Some("webm".into());
+        assert_eq!(
+            manifest_rel_path(&video),
+            PathBuf::from("media/posts/webm.webm")
+        );
         assert_eq!(
             manifest_rel_path(&item("image", "abc", None)),
             PathBuf::from("media/posts/abc.jpg")
@@ -392,7 +409,10 @@ mod tests {
             PathBuf::from("media/posts/abc_thumb.jpg")
         );
         assert_eq!(
-            manifest_rel_path(&item("video", "abc", Some(1))),
+            manifest_rel_path(&ManifestItem {
+                ext: Some("mp4".into()),
+                ..item("video", "abc", Some(1))
+            }),
             PathBuf::from("media/posts/abc_01.mp4")
         );
         let icon = ManifestItem {
@@ -424,6 +444,8 @@ mod tests {
 
         it.url = "https://example.com/download".into();
         assert_eq!(manifest_rel_path(&it), PathBuf::from("media/posts/abc.jpg"));
+        it.kind = "video".into();
+        assert_eq!(manifest_rel_path(&it), PathBuf::from("media/posts/abc.mp4"));
     }
 
     #[test]
@@ -440,6 +462,26 @@ mod tests {
             part_path(Path::new("/a/media/posts/x.jpg")),
             PathBuf::from("/a/media/posts/x.jpg.part")
         );
+    }
+
+    #[test]
+    fn session_cookies_are_scoped_to_secure_reddit_hosts() {
+        let headers = media_headers("test", Some("reddit_session=secret")).unwrap();
+        for url in ["https://reddit.com/file", "https://www.reddit.com/file"] {
+            assert!(request_headers(&headers, url).contains_key("cookie"));
+        }
+        for url in [
+            "http://www.reddit.com/file",
+            "https://i.redd.it/file",
+            "https://reddit.com.example.org/file",
+            "https://example.org/file",
+            "https://reddit.com@example.org/file",
+            "invalid",
+        ] {
+            let scoped = request_headers(&headers, url);
+            assert!(!scoped.contains_key("cookie"), "{url}");
+            assert!(scoped.contains_key("user-agent"));
+        }
     }
 
     #[tokio::test]

@@ -1,3 +1,2 @@
-# rustfmt configuration — see https://rust-lang.github.io/rustfmt/
 edition = "2024"
 max_width = 100

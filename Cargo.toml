@@ -1,6 +1,6 @@
 [package]
 name = "reddit"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Reddit offline viewer: save a subreddit's posts, images and galleries as JSON + media"
@@ -11,6 +11,7 @@ homepage = "https://github.com/reddit-rs/reddit"
 documentation = "https://docs.rs/reddit"
 keywords = ["reddit", "viewer", "offline", "archive", "media"]
 categories = ["command-line-utilities", "web-programming::http-client"]
+include = ["src/**", "examples/**", "Cargo.toml", "Cargo.lock", "README.md", "docs/**", "LICENSE-*"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time"] }

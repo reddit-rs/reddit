@@ -8,31 +8,13 @@ use std::path::PathBuf;
     name = "reddit",
     version,
     about = "Reddit offline viewer: save subreddit posts and media as JSON",
-    long_about = "Offline viewer for reddit. By default it saves the first page of a \
-listing (~25 posts) as JSON and downloads their images — galleries keep every image, \
-videos are skipped. Use --posts 0 to paginate the whole listing and --videos to grab \
-reddit-hosted video files.\n\n\
-Only some media containers can be kept: --formats gif downloads just the GIFs, \
---formats jpg,jpeg keeps JPEG stills (jpg and jpeg are the same format). The listing \
-JSON still describes every post. Video formats imply --videos.\n\n\
-Image handling can be tuned too: --min-size 768x1024 skips stills below 768x1024 \
-(portrait) / 1024x768 (landscape), --max-size 1344x1792 downscales anything larger, \
-and --convert jpg normalizes JPEG/PNG/BMP stills to a single format (lossy; GIF/WebP \
-are kept as-is).\n\n\
-Several subreddits (or users) can be archived in one run; each gets its own directory \
-under the output root. Re-running a target is incremental: the fresh listing is merged \
-into the existing archive and media files already on disk are not downloaded again.\n\n\
-Pass --cookies with a Netscape cookies.txt (or 'k=v; k2=v2'). Reddit rejects \
-anonymous JSON requests from many networks, so cookies exported from your browser \
-are the reliable way to fetch any listing — they also unlock private and NSFW \
-subreddits, provided the account can view them.\n\n\
-Examples:\n  \
-reddit funny --cookies cookies.txt\n  \
-reddit funny rust --posts 0 --offline --cookies cookies.txt\n  \
-reddit gifs --formats gif --posts 0 --cookies cookies.txt\n  \
-reddit pics --min-size 768x1024 --max-size 1344x1792 --convert jpg --cookies cookies.txt\n  \
-reddit https://www.reddit.com/r/funny --sort new --posts 5 --cookies cookies.txt\n  \
-reddit u/spez --sort top --time year --gallery-images 10 --cookies cookies.txt"
+    long_about = "Archive subreddit or user listings as JSON and media. Defaults to \
+the first listing page (~25 posts), all gallery images, and no videos. Re-runs \
+merge posts and reuse cached media. Reddit may require browser-exported cookies.",
+    after_help = "Examples:\n  \
+reddit pics --offline --cookies cookies.txt\n  \
+reddit pics rust --posts 0 --offline --cookies cookies.txt\n  \
+reddit gifs --formats gif --cookies cookies.txt"
 )]
 struct Cli {
     /// One or more subreddits/users: name, r/name, u/name or a full reddit URL
@@ -353,4 +335,64 @@ async fn main() -> Result<()> {
         total(|s| s.media_failed),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_definition_is_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn sizes_require_two_positive_dimensions() {
+        assert_eq!(parse_size("768x1024").unwrap(), (768, 1024));
+        assert_eq!(parse_size(" 768X1024 ").unwrap(), (768, 1024));
+        for value in [
+            "",
+            "768",
+            "0x1024",
+            "768x0",
+            "1x2x3",
+            "-1x2",
+            "4294967296x1",
+        ] {
+            assert!(parse_size(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn optional_post_caps_and_multiple_targets() {
+        let cli = Cli::try_parse_from(["reddit", "pics", "rust", "--posts", "--offline"]).unwrap();
+        assert_eq!(cli.targets, ["pics", "rust"]);
+        assert_eq!(cli.posts, Some(Some(0)));
+        assert!(cli.offline);
+        assert_eq!(
+            Cli::try_parse_from(["reddit", "pics", "--posts", "5"])
+                .unwrap()
+                .posts,
+            Some(Some(5))
+        );
+    }
+
+    #[test]
+    fn format_aliases_and_quality_validation() {
+        let cli = Cli::try_parse_from([
+            "reddit",
+            "pics",
+            "--formats",
+            "jpeg,png",
+            "--convert",
+            "JPEG",
+        ])
+        .unwrap();
+        assert_eq!(cli.formats, [FormatArg::Jpg, FormatArg::Png]);
+        assert_eq!(cli.convert, Some(ConvertArg::Jpg));
+        for quality in ["0", "101"] {
+            assert!(Cli::try_parse_from(["reddit", "pics", "--quality", quality]).is_err());
+        }
+    }
 }
