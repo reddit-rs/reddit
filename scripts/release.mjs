@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -303,7 +304,7 @@ function publish() {
     );
     if (existing.status === 0) {
       assert.equal(
-        JSON.parse(existing.stdout),
+        registryIntegrity(JSON.parse(existing.stdout)),
         packed.integrity,
         `Published contents differ: ${manifest.name}`,
       );
@@ -320,6 +321,92 @@ function publish() {
         { cwd, stdio: "inherit" },
       );
     }
+  }
+}
+
+export function registryIntegrity(value) {
+  if (Array.isArray(value)) {
+    assert.equal(
+      value.length,
+      1,
+      "Expected one exact-version npm integrity value",
+    );
+    [value] = value;
+  }
+  assert.ok(
+    typeof value === "string" && /^sha512-[A-Za-z0-9+/]+={0,2}$/.test(value),
+    "Invalid npm integrity value",
+  );
+  return value;
+}
+
+export async function verifyInstalledCli({
+  attempts = 12,
+  delayMs = 10000,
+  run = spawnSync,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  assert.ok(
+    Number.isInteger(attempts) && attempts > 0 && delayMs >= 0,
+    "Invalid npm retry settings",
+  );
+  const version = verifyVersion();
+  const temporary = fs.mkdtempSync(
+    path.join(process.env.RUNNER_TEMP ?? os.tmpdir(), "reddit-npm-smoke-"),
+  );
+  const config = path.join(temporary, "public.npmrc");
+  fs.writeFileSync(config, "registry=https://registry.npmjs.org/\n");
+  const env = {
+    ...process.env,
+    NPM_CONFIG_USERCONFIG: config,
+    NPM_CONFIG_REGISTRY: "https://registry.npmjs.org/",
+    NPM_CONFIG_FETCH_RETRIES: "0",
+    NPM_CONFIG_FETCH_TIMEOUT: "15000",
+  };
+  delete env.NODE_AUTH_TOKEN;
+  try {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      // A failed optional dependency install can persist in npx's cache. Each
+      // retry gets a fresh cache so it verifies a complete anonymous install.
+      const result = run(
+        "npx",
+        [
+          "--yes",
+          "--ignore-scripts",
+          "--prefer-online",
+          "--cache",
+          path.join(temporary, String(attempt)),
+          `@rddt/cli@${version}`,
+          "--version",
+        ],
+        { encoding: "utf8", env, timeout: 30000 },
+      );
+      if (result.error && result.error.code !== "ETIMEDOUT") throw result.error;
+      if (result.status === 0) {
+        assert.equal(
+          result.stdout.trim(),
+          `reddit ${version}`,
+          "Installed binary version differs",
+        );
+        console.log(result.stdout.trim());
+        return;
+      }
+      const message = `${result.error?.message ?? ""}\n${result.stderr ?? ""}\n${result.stdout ?? ""}`;
+      const transient =
+        /E404|ETARGET|EAI_AGAIN|ECONNRESET|ETIMEDOUT|E429|E503|Missing @rddt\/cli-/.test(
+          message,
+        );
+      if (!transient || attempt === attempts)
+        throw new Error(
+          `Public npm installation failed after ${attempt} attempt(s): ${message}`,
+        );
+      console.warn(
+        `npm packages are not yet available (attempt ${attempt}/${attempts}); retrying in ${delayMs / 1000}s`,
+      );
+      await wait(delayMs);
+    }
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
   }
 }
 
@@ -344,9 +431,12 @@ if (
     case "publish":
       publish();
       break;
+    case "verify-install":
+      await verifyInstalledCli();
+      break;
     default:
       throw new Error(
-        "Usage: release.mjs verify|archive|prepare|smoke|publish [target] [binary]",
+        "Usage: release.mjs verify|archive|prepare|smoke|publish|verify-install [target] [binary]",
       );
   }
 }

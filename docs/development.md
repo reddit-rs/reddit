@@ -87,13 +87,15 @@ Required repository secrets: `NPM_TOKEN` (publish rights to the `@rddt` scope) a
 includes provenance. The workflow's `GITHUB_TOKEN` must be allowed to push to `main`
 for formula updates; branch protection must permit the bot or the push will fail.
 
-For the shorter `brew install reddit-rs/tap/reddit` command, add
-`HOMEBREW_TAP_TOKEN` to this repository: a fine-grained token scoped only to
-`reddit-rs/homebrew-tap`, with **Contents: read and write**. Approve it for the
-organization if required. `update-homebrew.yml` uses it to update the separate tap.
-Without this secret, that update is skipped with a warning; binary and npm
-publishing are unaffected. After adding the secret, run **Update Homebrew tap**
-with the published tag to update the bootstrap formula without rebuilding binaries.
+The separate `reddit-rs/homebrew-tap` repository updates itself from published
+release assets, periodically or through its **Update reddit** workflow. It uses
+its own repository-scoped `GITHUB_TOKEN`; no personal access token, deploy key,
+or cross-repository secret is required. Formula updates never downgrade versions.
+
+Docker images build on native x64/ARM runners, with architecture-specific locked
+Cargo caches, before their digests are combined into a multi-platform manifest.
+The public npm smoke test uses fresh anonymous caches and bounded retries to
+handle registry propagation. Authorization failures are not retried.
 
 Retry a failed release with **Release binaries and installers → Run workflow**,
 specifying its existing tag. npm retries verify published package integrity rather

@@ -7,11 +7,78 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   createTarArchive,
+  registryIntegrity,
+  verifyInstalledCli,
   assetName,
   renderFormula,
   verifyChecksum,
   verifyVersion,
 } from "../release.mjs";
+
+test("npm integrity supports scalar and singleton-array output without ambiguity", () => {
+  const integrity = `sha512-${createHash("sha512").update("fixture").digest("base64")}`;
+  assert.equal(registryIntegrity(integrity), integrity);
+  assert.equal(registryIntegrity([integrity]), integrity);
+  for (const value of [[], [integrity, integrity], {}, null, "invalid"]) {
+    assert.throws(() => registryIntegrity(value));
+  }
+});
+
+test("npm smoke test retries propagation with fresh, anonymous install caches", async () => {
+  let calls = 0;
+  let waits = 0;
+  const caches = [];
+  await verifyInstalledCli({
+    attempts: 3,
+    delayMs: 1,
+    wait: async () => {
+      waits++;
+    },
+    run: (command, args, options) => {
+      assert.equal(command, "npx");
+      assert.equal(options.env.NODE_AUTH_TOKEN, undefined);
+      assert.equal(
+        options.env.NPM_CONFIG_REGISTRY,
+        "https://registry.npmjs.org/",
+      );
+      caches.push(args[args.indexOf("--cache") + 1]);
+      calls++;
+      if (calls === 1) return { status: 1, stderr: "npm error E404" };
+      if (calls === 2)
+        return { status: 1, stderr: "rddt: Missing @rddt/cli-linux-x64" };
+      return { status: 0, stdout: `reddit ${verifyVersion()}\n` };
+    },
+  });
+  assert.equal(waits, 2);
+  assert.equal(new Set(caches).size, 3);
+  assert.ok(caches.every((cache) => !fs.existsSync(path.dirname(cache))));
+});
+
+test("npm smoke test is bounded and does not retry real authorization errors", async () => {
+  let calls = 0;
+  await assert.rejects(
+    verifyInstalledCli({
+      attempts: 2,
+      delayMs: 0,
+      wait: async () => {},
+      run: () => {
+        calls++;
+        return { status: 1, stderr: "E404" };
+      },
+    }),
+    /after 2 attempt/,
+  );
+  assert.equal(calls, 2);
+  await assert.rejects(
+    verifyInstalledCli({
+      run: () => ({ status: 1, stderr: "E403" }),
+      wait: async () => {
+        assert.fail("Must not retry authorization failures");
+      },
+    }),
+    /after 1 attempt/,
+  );
+});
 
 test("tar writes archives outside an absolute staging path, including Windows drives", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "reddit-tar-"));

@@ -9,7 +9,7 @@ docker run --rm \
   --user "$(id -u):$(id -g)" \
   -v "$PWD/output:/data" \
   -v "$PWD/cookies.txt:/cookies.txt:ro" \
-  ghcr.io/reddit-rs/reddit:0.5.1 pics --offline --cookies /cookies.txt
+  ghcr.io/reddit-rs/reddit:0.5.2 pics --offline --cookies /cookies.txt
 ```
 
 The image sets `REDDIT_OUT_DIR=/data`. All [CLI options](usage.md) work in Docker;

@@ -200,9 +200,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/release.mjs publish
       - name: Test installation from npm
-        env:
-          NPM_CONFIG_USERCONFIG: /dev/null
-        run: npx --yes "@rddt/cli@$(node scripts/release.mjs verify)" --version
+        run: node scripts/release.mjs verify-install
 
   homebrew:
     needs: [version, npm]
@@ -247,14 +245,6 @@ jobs:
     with:
       tag: ${{ needs.version.outputs.tag }}
     secrets: inherit
-
-  tap:
-    needs: [version, homebrew]
-    uses: ./.github/workflows/update-homebrew.yml
-    with:
-      tag: ${{ needs.version.outputs.tag }}
-    secrets:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   docker:
     needs: [version, homebrew]
