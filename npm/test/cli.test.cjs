@@ -7,6 +7,7 @@ const { test } = require("node:test");
 const { execute, resolveBinary } = require("../lib/cli.cjs");
 const platforms = require("../platforms.cjs");
 const manifest = require("../package.json");
+const nodeShebang = /^#!\/usr\/bin\/env node\r?\n/;
 
 test("npm exposes only the reddit command and its launcher exists", () => {
   const fs = require("node:fs");
@@ -15,8 +16,15 @@ test("npm exposes only the reddit command and its launcher exists", () => {
     path.join(__dirname, "..", manifest.bin.reddit),
     "utf8",
   );
-  assert.ok(launcher.startsWith("#!/usr/bin/env node\n"));
+  assert.match(launcher, nodeShebang);
   assert.ok(launcher.includes("reddit: ${result.error.message}"));
+});
+
+test("launcher validation accepts LF and CRLF without accepting other interpreters", () => {
+  for (const newline of ["\n", "\r\n"]) {
+    assert.match(`#!/usr/bin/env node${newline}\"use strict\";`, nodeShebang);
+  }
+  assert.doesNotMatch("#!/usr/bin/env python\n", nodeShebang);
 });
 
 test("every release target has an exact-version optional dependency", () => {

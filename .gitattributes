@@ -1,0 +1,7 @@
+* text=auto
+
+# Launchers and automation must retain Unix-compatible shebangs on every host.
+*.cjs text eol=lf
+*.mjs text eol=lf
+*.yml text eol=lf
+.githooks/* text eol=lf
