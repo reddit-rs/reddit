@@ -2,29 +2,29 @@
 class Reddit < Formula
   desc "Archive Reddit listings as JSON and media with an offline viewer"
   homepage "https://github.com/reddit-rs/reddit"
-  version "0.5.2"
+  version "0.5.4"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     depends_on macos: :sonoma
     on_arm do
-      url "https://github.com/reddit-rs/reddit/releases/download/v0.5.2/reddit-v0.5.2-aarch64-apple-darwin.tar.gz"
-      sha256 "7404f9fcd87c3f421bb0816b6c6103a4268c139611f7d7fa914b95d29a2cc696"
+      url "https://github.com/reddit-rs/reddit/releases/download/v0.5.4/reddit-v0.5.4-aarch64-apple-darwin.tar.gz"
+      sha256 "b7600813260345667e4afb1a4bb838122a6a57e6edc687c89031f97eb327667d"
     end
     on_intel do
-      url "https://github.com/reddit-rs/reddit/releases/download/v0.5.2/reddit-v0.5.2-x86_64-apple-darwin.tar.gz"
-      sha256 "825518bbf9dded0e39e4c2b5a4624b49ae5a897d6ab90e2fe7a910b9c288cc43"
+      url "https://github.com/reddit-rs/reddit/releases/download/v0.5.4/reddit-v0.5.4-x86_64-apple-darwin.tar.gz"
+      sha256 "003488838327fbb33273937a47f54e1c38c05410bb601526c8426f198af3e4fa"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/reddit-rs/reddit/releases/download/v0.5.2/reddit-v0.5.2-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "2b277a01d0bb34368f5a244ad8c8672427ba235ebf87f9d535e187827113a6c1"
+      url "https://github.com/reddit-rs/reddit/releases/download/v0.5.4/reddit-v0.5.4-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "b78c8e75d52b2267e4d4508fa6f78982df45c6b6df5de38f21ad6d2a6c3f5c3c"
     end
     on_intel do
-      url "https://github.com/reddit-rs/reddit/releases/download/v0.5.2/reddit-v0.5.2-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "ad3dfeccbdf56371594bfdc9d295492b5ade22a0f99e7410ae4b8ab560934117"
+      url "https://github.com/reddit-rs/reddit/releases/download/v0.5.4/reddit-v0.5.4-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "b16152bf879355af22749bcc22236e9d4fdcae39d5713840e9881d49258d2283"
     end
   end
 
