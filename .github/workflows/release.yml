@@ -194,13 +194,22 @@ jobs:
           name: installers
           path: dist
       - name: Restore executable permissions
-        run: find dist/npm -type f \( -name reddit -o -name reddit.exe -o -name rddt.cjs \) -exec chmod 755 {} +
+        run: find dist/npm -type f \( -name reddit -o -name reddit.exe -o -name reddit.cjs \) -exec chmod 755 {} +
       - name: Publish native packages, then the launcher
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/release.mjs publish
       - name: Test installation from npm
         run: node scripts/release.mjs verify-install
+      - name: Verify global reddit command
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: |
+          version=$(node scripts/release.mjs verify)
+          prefix="$RUNNER_TEMP/reddit-cli"
+          npm install --global --prefix "$prefix" --ignore-scripts --no-audit --no-fund "@rddt/cli@$version"
+          test "$("$prefix/bin/reddit" --version)" = "reddit $version"
+          test ! -e "$prefix/bin/rddt"
 
   homebrew:
     needs: [version, npm]

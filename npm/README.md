@@ -7,7 +7,7 @@ offline archiver. No Rust installation or runtime binary download is required.
 npx @rddt/cli pics --offline --cookies cookies.txt
 # Or install the launcher globally:
 npm install -g @rddt/cli
-rddt --help
+reddit --help
 ```
 
 Supports macOS 14+, Linux with glibc 2.35+, and Windows, on x64 and arm64.

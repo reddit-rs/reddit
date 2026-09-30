@@ -17,7 +17,7 @@ Verify downloads before installing. For example, on Linux:
 
 ```sh
 sha256sum --ignore-missing --check SHA256SUMS
-tar -xzf reddit-v0.5.2-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf reddit-v0.5.3-x86_64-unknown-linux-gnu.tar.gz
 ./reddit --version
 ```
 
@@ -45,10 +45,10 @@ The original tap in this repository remains available for compatibility.
 npx @rddt/cli --help
 npx @rddt/cli pics --offline --cookies cookies.txt
 # Pin a version for reproducibility:
-npx @rddt/cli@0.5.2 --version
+npx @rddt/cli@0.5.3 --version
 ```
 
-Or install globally with `npm install -g @rddt/cli` and run `rddt`.
+Or install globally with `npm install -g @rddt/cli` and run `reddit`.
 Node.js 22+ is required. The launcher installs one matching native optional
 dependency, forwards arguments and standard I/O without a shell, and preserves
 the native exit status. There are no install scripts or runtime binary downloads.

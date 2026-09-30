@@ -8,6 +8,17 @@ const { execute, resolveBinary } = require("../lib/cli.cjs");
 const platforms = require("../platforms.cjs");
 const manifest = require("../package.json");
 
+test("npm exposes only the reddit command and its launcher exists", () => {
+  const fs = require("node:fs");
+  assert.deepEqual(manifest.bin, { reddit: "bin/reddit.cjs" });
+  const launcher = fs.readFileSync(
+    path.join(__dirname, "..", manifest.bin.reddit),
+    "utf8",
+  );
+  assert.ok(launcher.startsWith("#!/usr/bin/env node\n"));
+  assert.ok(launcher.includes("reddit: ${result.error.message}"));
+});
+
 test("every release target has an exact-version optional dependency", () => {
   assert.equal(
     Object.keys(manifest.optionalDependencies).length,

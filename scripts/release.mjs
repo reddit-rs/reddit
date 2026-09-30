@@ -227,7 +227,7 @@ function prepare() {
     });
   for (const license of ["LICENSE-MIT", "LICENSE-APACHE"])
     fs.copyFileSync(path.join(root, license), path.join(launcher, license));
-  fs.chmodSync(path.join(launcher, "bin/rddt.cjs"), 0o755);
+  fs.chmodSync(path.join(launcher, "bin/reddit.cjs"), 0o755);
   fs.writeFileSync(
     path.join(directory, "SHA256SUMS"),
     Object.entries(checksums)
@@ -258,7 +258,7 @@ function smoke(target, binary) {
   );
   fs.chmodSync(path.join(pkg, "bin", binaryName(target)), 0o755);
   try {
-    const wrapper = path.join(root, "npm/bin/rddt.cjs");
+    const wrapper = path.join(root, "npm/bin/reddit.cjs");
     assert.equal(
       execFileSync(process.execPath, [wrapper, "--version"], {
         encoding: "utf8",

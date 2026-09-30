@@ -25,7 +25,7 @@ brew install reddit-rs/tap/reddit
 
 ```sh
 npm install -g @rddt/cli
-rddt --help
+reddit --help
 ```
 
 Or use `npx @rddt/cli` without a global installation. JavaScript only launches

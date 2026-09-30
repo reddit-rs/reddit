@@ -45,7 +45,7 @@ test("npm smoke test retries propagation with fresh, anonymous install caches", 
       calls++;
       if (calls === 1) return { status: 1, stderr: "npm error E404" };
       if (calls === 2)
-        return { status: 1, stderr: "rddt: Missing @rddt/cli-linux-x64" };
+        return { status: 1, stderr: "reddit: Missing @rddt/cli-linux-x64" };
       return { status: 0, stdout: `reddit ${verifyVersion()}\n` };
     },
   });
