@@ -12,3 +12,6 @@ cookies.txt
 node_modules/
 dist/
 *.tgz
+
+# local command logs
+.agent-logs/

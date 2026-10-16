@@ -2,24 +2,28 @@
 
 ## Build and check
 
-The package declares Rust 1.88+ (edition 2024). CI and Docker pin Rust 1.98.1;
-use that toolchain for release parity. Building the TLS dependency requires
-CMake, Perl, a C/C++ compiler, and libclang.
+The crate requires Rust 1.99+ (edition 2024); `rust-toolchain.toml`, CI and
+Docker pin Rust 1.99.1. Building the TLS dependency requires CMake, Perl, a
+C/C++ compiler, and libclang.
 
 ```sh
 cargo build --release --locked
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo clippy --lib --no-default-features --locked -- -D warnings
 cargo test --all-targets --all-features --locked
 RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --all-features --locked
 ```
+
+The `cli` feature (default) builds the `reddit` binary; library users can
+disable default features to avoid clap.
 
 Tests use generated fixtures and a mock HTTP server; no Reddit credentials or
 live network access are required. A small authenticated smoke test is separate:
 
 ```sh
-cargo run --locked -- pics --posts 5 --offline --cookies cookies.txt --out-dir output/smoke
-# Repeat to check caching, then open output/smoke/index.html.
+cargo run --release --locked -- pics --posts 5 --offline --cookies cookies.txt --out-dir output/smoke
+# Repeat to check caching and merging, then open output/smoke/index.html.
 ```
 
 Do not commit cookies, generated archives, or logs. Optional local commit checks:
@@ -34,7 +38,7 @@ dependencies:
 ```sh
 npm test --prefix npm
 node scripts/release.mjs verify
-npx --yes prettier@3.9.9 --check npm scripts .github/workflows README.md docs
+npx --yes prettier@3.9.10 --check npm scripts .github/workflows README.md docs
 actionlint
 ```
 
@@ -42,17 +46,20 @@ actionlint
 
 | Path                   | Responsibility                                                       |
 | ---------------------- | -------------------------------------------------------------------- |
-| `src/lib.rs`           | Public modules and API re-exports                                    |
-| `src/main.rs`          | CLI argument parsing, target runs, summary                           |
-| `src/target.rs`        | Target validation and URL hints                                      |
-| `src/pipeline.rs`      | Configuration, incremental merge, persistence, orchestration         |
-| `src/storage.rs`       | Shared atomic archive writes                                         |
-| `src/client.rs`        | Listing HTTP requests, pagination, retries                           |
-| `src/clean.rs`         | API normalization, manifest construction, parsing helpers            |
-| `src/models.rs`        | Shared data types and serialization                                  |
-| `src/download.rs`      | Media paths, caching, parallel downloads, atomic writes              |
+| `src/lib.rs`           | Crate documentation and public API re-exports                        |
+| `src/main.rs`          | CLI arguments (`cli` feature), per-target runs, summary              |
+| `src/pipeline.rs`      | `Config`, run orchestration                                          |
+| `src/target.rs`        | Validated targets, name/path/URL parsing, sort/time hints            |
+| `src/cookies.rs`       | Netscape and inline cookie parsing                                   |
+| `src/http.rs`          | Shared browser-emulating HTTP client, retry and rate-limit policy    |
+| `src/client.rs`        | Listing/about API requests and pagination                            |
+| `src/normalize.rs`     | Raw Reddit JSON to models                                            |
+| `src/models.rs`        | Domain types and serialization                                       |
+| `src/manifest.rs`      | Media selection: formats, sizes, gallery limits, planned conversions |
+| `src/download.rs`      | Cached, parallel media downloads with fallbacks and format checks    |
 | `src/transform.rs`     | Still-image conversion and downscaling                               |
-| `src/html.rs`          | Self-contained viewer and archive hub                                |
+| `src/archive.rs`       | Archive files, atomic writes, incremental merge, archive discovery   |
+| `src/html.rs`          | Viewer rendering; templates live in `src/viewer/`                    |
 | `tests/integration.rs` | Mocked end-to-end tests                                              |
 | `examples/archive.rs`  | Runnable library example                                             |
 | `npm/`                 | Thin native CLI proxy and platform package mapping                   |
@@ -60,8 +67,8 @@ actionlint
 | `Formula/reddit.rb`    | Homebrew tap formula, updated automatically after releases           |
 | `.github/workflows/`   | CI, crate publishing, multi-platform Docker publishing               |
 
-Keep archive formats and public API compatible during maintenance refactors.
-Comments should explain constraints or non-obvious behavior, not repeat the code.
+Comments should explain constraints or non-obvious behavior, not repeat the
+code. Record user-visible changes in `CHANGELOG.md`.
 
 ## Releases
 

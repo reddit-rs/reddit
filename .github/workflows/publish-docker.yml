@@ -78,7 +78,7 @@ jobs:
         run: |
           mkdir digests
           touch "digests/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: docker-digest-${{ matrix.arch }}
           path: digests/*
@@ -94,7 +94,7 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
       - uses: docker/setup-buildx-action@v4.4.1
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: docker-digest-*
           merge-multiple: true

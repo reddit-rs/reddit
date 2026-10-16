@@ -29,9 +29,9 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref_name }}
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 24.22.0
       - name: Verify release tag and package versions
         id: version
         env:
@@ -81,15 +81,15 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.version.outputs.tag }}
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 24.22.0
           architecture: ${{ matrix.arch }}
       - name: Install Rust
         shell: bash
         run: |
-          rustup toolchain install 1.98.1 --profile minimal --target "${{ matrix.target }}"
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal --target "${{ matrix.target }}"
+          rustup default 1.99.1
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -121,7 +121,7 @@ jobs:
         run: |
           node scripts/release.mjs smoke "${{ matrix.target }}"
           node scripts/release.mjs archive "${{ matrix.target }}"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: native-${{ matrix.target }}
           path: |
@@ -139,10 +139,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.version.outputs.tag }}
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24.21.0
-      - uses: actions/download-artifact@v8.0.1
+          node-version: 24.22.0
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: native-*
           merge-multiple: true
@@ -166,7 +166,7 @@ jobs:
             gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS dist/reddit.rb --clobber
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: installers
           path: |
@@ -185,11 +185,11 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.version.outputs.tag }}
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 24.22.0
           registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: installers
           path: dist
@@ -217,7 +217,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: installers
           path: installers

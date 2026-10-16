@@ -24,13 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 24.22.0
       - run: npm test --prefix npm
       - run: node scripts/release.mjs verify
       - name: Check JavaScript and documentation formatting
-        run: npx --yes prettier@3.9.9 --check npm scripts .github/workflows README.md docs
+        run: npx --yes prettier@3.9.10 --check npm scripts .github/workflows README.md docs
 
   check:
     name: fmt / clippy / test / docs (ubuntu)
@@ -39,10 +39,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
 
-      - name: Install Rust 1.98.1
+      - name: Install Rust 1.99.1
         run: |
-          rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.2
@@ -58,6 +58,9 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+      - name: Check the library without the CLI feature
+        run: cargo clippy --lib --no-default-features --locked -- -D warnings
+
       - name: Run tests
         run: cargo test --all-targets --all-features --locked
 
@@ -71,10 +74,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
 
-      - name: Install Rust 1.98.1
+      - name: Install Rust 1.99.1
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.2

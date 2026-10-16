@@ -66,6 +66,7 @@ audio track. Listings are API-limited; `--posts 0` is not a complete history.
 - [Installation](docs/install.md): binaries, Homebrew, and npm
 - [Development](docs/development.md): source layout, checks, and releases
 - [Library API](https://docs.rs/reddit) · [Example](examples/archive.rs)
+- [Changelog](CHANGELOG.md)
 
 Run `reddit --help` for the full CLI reference.
 

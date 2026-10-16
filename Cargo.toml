@@ -1,8 +1,8 @@
 [package]
 name = "reddit"
-version = "0.5.4"
+version = "0.6.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99"
 description = "Reddit offline viewer: save a subreddit's posts, images and galleries as JSON + media"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -11,23 +11,32 @@ homepage = "https://github.com/reddit-rs/reddit"
 documentation = "https://docs.rs/reddit"
 keywords = ["reddit", "viewer", "offline", "archive", "media"]
 categories = ["command-line-utilities", "web-programming::http-client"]
-include = ["src/**", "examples/**", "Cargo.toml", "Cargo.lock", "README.md", "docs/**", "LICENSE-*"]
+include = ["src/**", "examples/**", "Cargo.toml", "Cargo.lock", "README.md", "CHANGELOG.md", "docs/**", "LICENSE-*"]
+
+[features]
+default = ["cli"]
+# The command-line binary; library users can opt out of clap.
+cli = ["dep:clap"]
+
+[[bin]]
+name = "reddit"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time"] }
-wreq = { version = "6.0.0-rc", features = ["query", "json"] }
-wreq-util = "3.0.0-rc"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-clap = { version = "4", features = ["derive", "env"] }
-chrono = "0.4"
-anyhow = "1"
-regex = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp"] }
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.6.7", features = ["derive", "env"], optional = true }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "bmp"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "fs", "time"] }
+wreq = { version = "6.0.0-rc.31", features = ["query", "json"] }
+wreq-util = "3.0.0-rc.14"
 
 [dev-dependencies]
-wiremock = "0.6"
-tempfile = "3"
+tempfile = "3.27.0"
+wiremock = "0.6.5"
 
 [profile.release]
 lto = true

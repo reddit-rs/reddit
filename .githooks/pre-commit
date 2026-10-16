@@ -9,6 +9,7 @@ cargo fmt --all -- --check
 
 echo "[pre-commit] Running cargo clippy..."
 cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo clippy --lib --no-default-features --locked -- -D warnings
 
 echo "[pre-commit] Running cargo test..."
 cargo test --all-targets --all-features --locked

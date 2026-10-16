@@ -1,507 +1,310 @@
-//! Parallel media downloader with caching, retries and URL fallbacks.
+//! Parallel media downloads with caching, retries and URL fallbacks.
 //!
-//! Files already in the archive are never requested again: every manifest item
-//! is checked against the media directory before any HTTP request is made and
-//! reported as [`DownloadReport::cached`]. Successful downloads are written to
-//! a temporary `.part` file and renamed into place, so an interrupted run
-//! cannot leave a truncated file behind that a later run would mistake for
-//! cached content.
+//! A manifest item whose file already exists (non-empty) is never requested
+//! again. New files are written atomically, so an interrupted run cannot
+//! leave a truncated file that a later run would mistake for cached content.
 
-use crate::clean::{ext_from_url, format_from_mime, item_format};
+use crate::archive::write_atomic;
+use crate::http;
 use crate::models::{ManifestItem, MediaFormat};
-use crate::storage::write_atomic;
-use anyhow::Result;
-use std::path::{Path, PathBuf};
+use crate::transform::{self, Applied, TransformOptions};
+use anyhow::{Context, Result, anyhow, bail};
+use std::ops::AddAssign;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use wreq::Client;
-use wreq::header::{HeaderMap, HeaderValue};
-use wreq_util::Emulation;
+use tokio::task::JoinSet;
+use wreq::StatusCode;
+use wreq::header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, REFERER};
 
-/// Outcome of a media download pass.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Media statistics of a run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DownloadReport {
-    /// Manifest items considered.
+pub struct MediaReport {
+    /// Files selected by the manifest.
     pub total: usize,
-    /// Files fetched over the network this run.
+    /// Files fetched over the network.
     pub downloaded: usize,
-    /// Files that were already present on disk and were not requested again.
+    /// Files already on disk, not requested again.
     pub cached: usize,
-    /// Files that could not be downloaded from any candidate URL.
+    /// Files no candidate URL could provide.
     pub failed: usize,
-    /// Downloaded files whose container format was rewritten (`--convert`).
+    /// Downloads re-encoded by `--convert`.
     pub converted: usize,
-    /// Downloaded files whose pixel dimensions were reduced (`--max-size`).
+    /// Downloads shrunk by `--max-size`.
     pub resized: usize,
+    /// Stills dropped by `--min-size` before downloading.
+    pub skipped: usize,
 }
 
-impl DownloadReport {
-    /// Files that are now part of the archive (downloaded plus cached).
-    pub fn present(&self) -> usize {
-        self.downloaded + self.cached
+impl AddAssign for MediaReport {
+    fn add_assign(&mut self, other: Self) {
+        self.total += other.total;
+        self.downloaded += other.downloaded;
+        self.cached += other.cached;
+        self.failed += other.failed;
+        self.converted += other.converted;
+        self.resized += other.resized;
+        self.skipped += other.skipped;
     }
 }
 
-/// Opt-in, lossy image transforms applied while saving (see `--convert` and
-/// `--max-size`). Files already on disk are never rewritten.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TransformOptions {
-    /// Downscale images so neither side exceeds this `(width, height)` box.
-    pub max_size: Option<(u32, u32)>,
-    /// Rewrite JPEG/PNG/BMP stills as this format.
-    pub convert: Option<MediaFormat>,
-    /// JPEG quality (1-100).
-    pub quality: u8,
-}
-
-impl Default for TransformOptions {
-    fn default() -> Self {
-        Self {
-            max_size: None,
-            convert: None,
-            quality: 85,
-        }
-    }
-}
-
-/// The result of one manifest item: fetched now, or already on disk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Outcome {
-    Downloaded { converted: bool, resized: bool },
-    Cached,
-}
-
-/// Path of a manifest item relative to the `media/` directory
-/// (e.g. `posts/abc123_00.jpg`).
-fn file_name(item: &ManifestItem) -> PathBuf {
-    let ext = item
-        .ext
-        .clone()
-        .or_else(|| crate::clean::format_from_query(&item.url).map(|f| f.name().to_string()))
-        .or_else(|| ext_from_url(&item.url))
-        .unwrap_or_else(|| if item.kind == "video" { "mp4" } else { "jpg" }.to_string());
-    let name = match item.kind.as_str() {
-        "icon" => format!("subreddit_icon.{ext}"),
-        "banner" => format!("subreddit_banner.{ext}"),
-        "thumb" => format!("{}_thumb.{ext}", item.id),
-        "cover" => format!("{}_cover.{ext}", item.id),
-        _ => match item.index {
-            Some(i) => format!("{}_{i:02}.{ext}", item.id),
-            None => format!("{}.{ext}", item.id),
-        },
-    };
-    PathBuf::from(&item.folder).join(name)
-}
-
-/// On-disk path of a manifest item relative to the output directory
-/// (e.g. `media/posts/abc123_00.jpg`). Used by the offline viewer.
-pub(crate) fn manifest_rel_path(item: &ManifestItem) -> PathBuf {
-    PathBuf::from("media").join(file_name(item))
-}
-
-/// True when the item is already archived: a non-empty regular file.
-async fn is_present(path: &Path) -> bool {
-    tokio::fs::metadata(path)
-        .await
-        .map(|m| m.is_file() && m.len() > 0)
-        .unwrap_or(false)
-}
-
-fn media_headers(ua: &str, cookie_header: Option<&str>) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    if !ua.is_empty() {
-        headers.insert("User-Agent", HeaderValue::from_str(ua)?);
-    }
-    headers.insert("Accept", HeaderValue::from_static("*/*"));
-    headers.insert(
-        "Referer",
-        HeaderValue::from_static("https://www.reddit.com/"),
-    );
-    if let Some(c) = cookie_header
-        && let Ok(mut v) = HeaderValue::from_str(c)
-    {
-        v.set_sensitive(true);
-        headers.insert("Cookie", v);
-    }
-    Ok(headers)
-}
-
-// Session cookies belong to reddit.com, not arbitrary post links or CDN hosts.
-fn request_headers(headers: &HeaderMap, url: &str) -> HeaderMap {
-    let mut headers = headers.clone();
-    let trusted = url.parse::<wreq::Uri>().ok().is_some_and(|uri| {
-        uri.scheme_str() == Some("https")
-            && uri.host().is_some_and(|host| {
-                let host = host.to_ascii_lowercase();
-                host == "reddit.com" || host.ends_with(".reddit.com")
-            })
-    });
-    if !trusted {
-        headers.remove(wreq::header::COOKIE);
-    }
-    headers
-}
-
-/// Download every manifest item that is not already in `<outdir>/media`.
-///
-/// Presence is checked before any request is made, so re-running an archive
-/// costs no network traffic for media it already has.
-pub async fn download_all(
-    manifest: &[ManifestItem],
-    outdir: &Path,
-    ua: &str,
-    cookie_header: Option<&str>,
+/// Downloads manifest items into an archive directory.
+pub(crate) struct Downloader {
+    http: wreq::Client,
+    headers: HeaderMap,
+    transforms: TransformOptions,
     concurrency: usize,
-    transforms: &TransformOptions,
-) -> DownloadReport {
-    let mut report = DownloadReport {
-        total: manifest.len(),
-        ..DownloadReport::default()
-    };
-    let client = match Client::builder()
-        .emulation(Emulation::Chrome131)
-        .timeout(Duration::from_secs(120))
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("failed to build download client: {e}");
-            report.failed = manifest.len();
-            return report;
-        }
-    };
-    let headers = match media_headers(ua, cookie_header) {
-        Ok(h) => h,
-        Err(e) => {
-            println!("media headers invalid: {e}");
-            report.failed = manifest.len();
-            return report;
-        }
-    };
-    let sem = Arc::new(Semaphore::new(concurrency.max(1)));
-    let meddir = outdir.join("media");
+}
 
-    // Check the archive before going online: items that are already on disk
-    // are never requested again.
-    let mut pending = Vec::new();
-    for item in manifest {
-        if is_present(&meddir.join(file_name(item))).await {
-            report.cached += 1;
-        } else {
-            pending.push(item.clone());
+struct Saved {
+    converted: bool,
+    resized: bool,
+}
+
+impl Downloader {
+    /// `cookie` is only sent to HTTPS Reddit hosts.
+    pub fn new(
+        http: wreq::Client,
+        cookie: Option<HeaderValue>,
+        transforms: TransformOptions,
+        concurrency: usize,
+    ) -> Self {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        headers.insert(REFERER, HeaderValue::from_static("https://www.reddit.com/"));
+        if let Some(cookie) = cookie {
+            headers.insert(COOKIE, cookie);
+        }
+        Self {
+            http,
+            headers,
+            transforms,
+            concurrency: concurrency.max(1),
         }
     }
-    if report.cached > 0 {
+
+    /// Download every item missing from `archive_dir`.
+    pub async fn run(self, items: &[ManifestItem], archive_dir: &Path) -> MediaReport {
+        let mut report = MediaReport {
+            total: items.len(),
+            ..MediaReport::default()
+        };
+        let mut pending = Vec::new();
+        for item in items {
+            if is_present(&archive_dir.join(item.path())).await {
+                report.cached += 1;
+            } else {
+                pending.push(item.clone());
+            }
+        }
+        if pending.is_empty() {
+            return report;
+        }
         println!(
-            "media: {} of {} already cached, {} to fetch",
+            "media: {} cached, {} to download",
             report.cached,
-            manifest.len(),
             pending.len()
         );
-    }
 
-    let total = pending.len();
-    let mut handles = Vec::with_capacity(total);
-    for item in pending {
-        let client = client.clone();
-        let sem = sem.clone();
-        let meddir = meddir.clone();
-        let headers = headers.clone();
-        let transforms = *transforms;
-        handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.expect("semaphore closed");
-            download_one(&client, &item, &meddir, &headers, &transforms).await
-        }));
-    }
+        let this = Arc::new(self);
+        let permits = Arc::new(Semaphore::new(this.concurrency));
+        let mut tasks = JoinSet::new();
+        for item in pending {
+            let (this, permits, dir) = (this.clone(), permits.clone(), archive_dir.to_owned());
+            tasks.spawn(async move {
+                let _permit = permits
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore is never closed");
+                let result = this.fetch(&item, &dir).await;
+                (item, result)
+            });
+        }
 
-    let mut done = 0usize;
-    for h in handles {
-        done += 1;
-        match h.await {
-            Ok(Ok(Outcome::Downloaded { converted, resized })) => {
-                report.downloaded += 1;
-                report.converted += usize::from(converted);
-                report.resized += usize::from(resized);
-                if done.is_multiple_of(25) {
-                    println!("[{done}/{total}] downloaded");
+        let todo = tasks.len();
+        let mut done = 0;
+        while let Some(joined) = tasks.join_next().await {
+            done += 1;
+            match joined {
+                Ok((_, Ok(saved))) => {
+                    report.downloaded += 1;
+                    report.converted += usize::from(saved.converted);
+                    report.resized += usize::from(saved.resized);
+                }
+                Ok((item, Err(e))) => {
+                    report.failed += 1;
+                    eprintln!("  failed {}: {e:#}", item.web_path());
+                }
+                Err(e) => {
+                    report.failed += 1;
+                    eprintln!("  download task failed: {e}");
                 }
             }
-            Ok(Ok(Outcome::Cached)) => report.cached += 1,
-            Ok(Err(e)) => {
-                report.failed += 1;
-                println!("[{done}/{total}] FAIL {e}");
-            }
-            Err(e) => {
-                report.failed += 1;
-                println!("[{done}/{total}] FAIL task error: {e}");
+            if done % 25 == 0 || done == todo {
+                println!("  [{done}/{todo}] media processed");
             }
         }
-    }
-    let mut extra = Vec::new();
-    if report.converted > 0 {
-        extra.push(format!("{} converted", report.converted));
-    }
-    if report.resized > 0 {
-        extra.push(format!("{} resized", report.resized));
-    }
-    let extra = if extra.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", extra.join(", "))
-    };
-    println!(
-        "\nmedia: {} downloaded{extra}, {} cached, {} failed",
-        report.downloaded, report.cached, report.failed
-    );
-    report
-}
-
-async fn download_one(
-    client: &Client,
-    item: &ManifestItem,
-    meddir: &Path,
-    headers: &HeaderMap,
-    transforms: &TransformOptions,
-) -> Result<Outcome> {
-    let rel = file_name(item);
-    let path = meddir.join(&rel);
-    if is_present(&path).await {
-        return Ok(Outcome::Cached);
-    }
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        report
     }
 
-    let mut urls = vec![item.url.clone()];
-    if let Some(f) = &item.fallback
-        && f != &item.url
-    {
-        urls.push(f.clone());
+    /// Try the item's URL, then its fallback.
+    async fn fetch(&self, item: &ManifestItem, archive_dir: &Path) -> Result<Saved> {
+        let path = archive_dir.join(item.path());
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut last_error = anyhow!("no URL");
+        for url in std::iter::once(&item.url).chain(&item.fallback) {
+            match self.fetch_url(item, url).await {
+                Ok(data) => return self.save(item, data, &path).await,
+                Err(e) => last_error = e.context(url.clone()),
+            }
+        }
+        Err(last_error)
     }
-    // When the file will be re-encoded, the server's content type says nothing
-    // about the final format and must not be checked against it.
-    let converting = transforms.convert.is_some() && crate::clean::is_post_still(item);
 
-    for url in urls {
-        for attempt in 0..3 {
-            let resp = match client
-                .get(&url)
-                .headers(request_headers(headers, &url))
+    /// Body of `url`, retrying transient failures. Permanent failures and
+    /// content of the wrong format fail immediately so the next URL is tried.
+    async fn fetch_url(&self, item: &ManifestItem, url: &str) -> Result<Vec<u8>> {
+        let mut headers = self.headers.clone();
+        if !http::is_secure_reddit_url(url) {
+            headers.remove(COOKIE);
+        }
+        let mut last_error = anyhow!("no request made");
+        let mut wait = Duration::ZERO;
+        for attempt in 0..http::ATTEMPTS {
+            tokio::time::sleep(wait).await;
+            wait = http::backoff(attempt);
+            let response = match self
+                .http
+                .get(url)
+                .headers(headers.clone())
+                .timeout(REQUEST_TIMEOUT)
                 .send()
                 .await
             {
-                Ok(r) => r,
-                Err(_) => {
-                    tokio::time::sleep(Duration::from_secs(2 * (attempt + 1))).await;
+                Ok(response) => response,
+                Err(e) => {
+                    last_error = anyhow!("network error: {e}");
                     continue;
                 }
             };
-            let status = resp.status().as_u16();
-            if status == 200 {
-                // Never store a fallback of the wrong format under this file
-                // name (e.g. a jpg preview saved as `.gif`). Unknown content
-                // types are accepted; only known mismatches are rejected.
-                if !converting && let Some(expected) = item_format(item) {
-                    let actual = resp
-                        .headers()
-                        .get(wreq::header::CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(format_from_mime);
-                    if let Some(actual) = actual
-                        && actual != expected
-                    {
-                        println!(
-                            "  skipping {}: server sent {} (expected .{})",
-                            rel.display(),
-                            actual.name(),
-                            expected.name()
-                        );
-                        break; // try the next candidate URL
-                    }
-                }
-                let bytes = match resp.bytes().await {
-                    Ok(b) => b,
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_secs(2 * (attempt + 1))).await;
-                        continue;
-                    }
-                };
-                if !bytes.is_empty() {
-                    // Optional lossy transforms (convert / downscale). A
-                    // failure here is reported instead of writing content
-                    // that would not match its file name.
-                    match crate::transform::apply(&bytes, item, transforms) {
-                        Ok(crate::transform::Applied::Unchanged) => {
-                            write_atomic(&path, &bytes).await?;
-                            return Ok(Outcome::Downloaded {
-                                converted: false,
-                                resized: false,
-                            });
-                        }
-                        Ok(crate::transform::Applied::Transformed {
-                            bytes: out,
-                            converted,
-                            resized,
-                        }) => {
-                            write_atomic(&path, &out).await?;
-                            return Ok(Outcome::Downloaded { converted, resized });
-                        }
-                        Err(e) => {
-                            return Err(e.context(format!(
-                                "transforming {} (download happened; file not saved)",
-                                rel.display()
-                            )));
-                        }
-                    }
-                }
-            } else if status == 429 {
-                let wait = 15 * (attempt + 1);
-                println!("  rate limited on media (429), waiting {wait}s...");
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-            } else if status == 404 {
-                break; // fall through to the next candidate URL
-            } else {
-                tokio::time::sleep(Duration::from_secs(2 * (attempt + 1))).await;
+            let status = response.status();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                wait = http::rate_limit_wait(response.headers(), attempt);
+                println!("  media rate limited, waiting up to {}s", wait.as_secs());
+                last_error = anyhow!("HTTP 429");
+                continue;
             }
+            if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT {
+                last_error = anyhow!("HTTP {status}");
+                continue;
+            }
+            if !status.is_success() {
+                bail!("HTTP {status}");
+            }
+            let declared = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(MediaFormat::from_mime);
+            let data = match response.bytes().await {
+                Ok(data) if data.is_empty() => bail!("empty response"),
+                Ok(data) => data.to_vec(),
+                Err(e) => {
+                    last_error = anyhow!("interrupted download: {e}");
+                    continue;
+                }
+            };
+            self.check_format(item, transform::sniff(&data).or(declared))?;
+            return Ok(data);
         }
+        Err(last_error)
     }
-    Err(anyhow::anyhow!("{}", rel.display()))
+
+    /// Never store content under a file name of another format (e.g. a JPEG
+    /// preview as `.gif`). Unknown formats are accepted.
+    fn check_format(&self, item: &ManifestItem, actual: Option<MediaFormat>) -> Result<()> {
+        let (Some(expected), Some(actual)) = (item.format, actual) else {
+            return Ok(());
+        };
+        let converting = self.transforms.convert.is_some() && self.transforms.applies_to(item);
+        let acceptable = if converting {
+            actual.is_static_image()
+        } else {
+            actual == expected
+        };
+        if !acceptable {
+            bail!("server sent {actual}, expected {expected}");
+        }
+        Ok(())
+    }
+
+    async fn save(&self, item: &ManifestItem, data: Vec<u8>, path: &Path) -> Result<Saved> {
+        let (item, transforms) = (item.clone(), self.transforms);
+        let (data, applied) = tokio::task::spawn_blocking(move || {
+            let applied = transform::apply(&data, &item, &transforms);
+            (data, applied)
+        })
+        .await
+        .context("transform task failed")?;
+        let saved = match applied.context("cannot transform image")? {
+            Applied::Unchanged => {
+                write_atomic(path, &data).await?;
+                Saved {
+                    converted: false,
+                    resized: false,
+                }
+            }
+            Applied::Transformed {
+                bytes,
+                converted,
+                resized,
+            } => {
+                write_atomic(path, &bytes).await?;
+                Saved { converted, resized }
+            }
+        };
+        Ok(saved)
+    }
+}
+
+/// A non-empty regular file counts as archived.
+async fn is_present(path: &Path) -> bool {
+    tokio::fs::metadata(path)
+        .await
+        .is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::part_path;
-
-    fn item(kind: &str, id: &str, index: Option<usize>) -> ManifestItem {
-        ManifestItem {
-            folder: "posts".into(),
-            id: id.into(),
-            kind: kind.into(),
-            url: "https://i.redd.it/x.jpg".into(),
-            fallback: None,
-            ext: Some("jpg".into()),
-            index,
-            width: None,
-            height: None,
-        }
-    }
-
-    #[test]
-    fn file_names_cover_all_kinds() {
-        let mut video = item("video", "webm", None);
-        video.ext = Some("webm".into());
-        assert_eq!(
-            manifest_rel_path(&video),
-            PathBuf::from("media/posts/webm.webm")
-        );
-        assert_eq!(
-            manifest_rel_path(&item("image", "abc", None)),
-            PathBuf::from("media/posts/abc.jpg")
-        );
-        assert_eq!(
-            manifest_rel_path(&item("gallery", "abc", Some(3))),
-            PathBuf::from("media/posts/abc_03.jpg")
-        );
-        assert_eq!(
-            manifest_rel_path(&item("thumb", "abc", None)),
-            PathBuf::from("media/posts/abc_thumb.jpg")
-        );
-        assert_eq!(
-            manifest_rel_path(&ManifestItem {
-                ext: Some("mp4".into()),
-                ..item("video", "abc", Some(1))
-            }),
-            PathBuf::from("media/posts/abc_01.mp4")
-        );
-        let icon = ManifestItem {
-            folder: String::new(),
-            id: "subreddit".into(),
-            kind: "icon".into(),
-            url: "https://styles.redditmedia.com/i.png?w=256".into(),
-            fallback: None,
-            ext: None,
-            index: None,
-            width: None,
-            height: None,
-        };
-        assert_eq!(
-            manifest_rel_path(&icon),
-            PathBuf::from("media/subreddit_icon.png")
-        );
-    }
-
-    #[test]
-    fn extension_falls_back_to_url_then_jpg() {
-        let mut it = item("image", "abc", None);
-        it.ext = None;
-        it.url = "https://preview.redd.it/a.jpeg?s=1".into();
-        assert_eq!(
-            manifest_rel_path(&it),
-            PathBuf::from("media/posts/abc.jpeg")
-        );
-
-        it.url = "https://example.com/download".into();
-        assert_eq!(manifest_rel_path(&it), PathBuf::from("media/posts/abc.jpg"));
-        it.kind = "video".into();
-        assert_eq!(manifest_rel_path(&it), PathBuf::from("media/posts/abc.mp4"));
-    }
-
-    #[test]
-    fn format_query_decides_the_file_extension() {
-        let mut it = item("image", "abc", None);
-        it.ext = None;
-        it.url = "https://external-preview.redd.it/x.png?format=pjpg&auto=webp&s=1".into();
-        assert_eq!(manifest_rel_path(&it), PathBuf::from("media/posts/abc.jpg"));
-    }
-
-    #[test]
-    fn part_path_is_a_sibling() {
-        assert_eq!(
-            part_path(Path::new("/a/media/posts/x.jpg")),
-            PathBuf::from("/a/media/posts/x.jpg.part")
-        );
-    }
-
-    #[test]
-    fn session_cookies_are_scoped_to_secure_reddit_hosts() {
-        let headers = media_headers("test", Some("reddit_session=secret")).unwrap();
-        for url in ["https://reddit.com/file", "https://www.reddit.com/file"] {
-            assert!(request_headers(&headers, url).contains_key("cookie"));
-        }
-        for url in [
-            "http://www.reddit.com/file",
-            "https://i.redd.it/file",
-            "https://reddit.com.example.org/file",
-            "https://example.org/file",
-            "https://reddit.com@example.org/file",
-            "invalid",
-        ] {
-            let scoped = request_headers(&headers, url);
-            assert!(!scoped.contains_key("cookie"), "{url}");
-            assert!(scoped.contains_key("user-agent"));
-        }
-    }
 
     #[tokio::test]
-    async fn presence_requires_a_nonempty_file() {
+    async fn presence_requires_a_non_empty_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.jpg");
         assert!(!is_present(&path).await);
-        tokio::fs::write(&path, b"").await.unwrap();
-        assert!(!is_present(&path).await, "empty file must be re-downloaded");
-        tokio::fs::write(&path, b"x").await.unwrap();
+        std::fs::write(&path, b"").unwrap();
+        assert!(!is_present(&path).await, "empty files are re-downloaded");
+        std::fs::write(&path, b"x").unwrap();
         assert!(is_present(&path).await);
         assert!(!is_present(dir.path()).await, "directories are not files");
     }
 
-    #[tokio::test]
-    async fn atomic_write_leaves_no_partial_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.jpg");
-        write_atomic(&path, b"data").await.unwrap();
-        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"data");
-        assert!(!part_path(&path).exists());
+    #[test]
+    fn reports_add_up() {
+        let one = MediaReport {
+            total: 2,
+            downloaded: 1,
+            cached: 1,
+            ..MediaReport::default()
+        };
+        let mut sum = one;
+        sum += one;
+        assert_eq!((sum.total, sum.downloaded, sum.cached), (4, 2, 2));
     }
 }

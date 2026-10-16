@@ -1,0 +1,3 @@
+# Keep in sync with the Rust version pinned in .github/workflows and the Dockerfile.
+[toolchain]
+channel = "1.99.1"

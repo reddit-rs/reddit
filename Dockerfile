@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- builder: Alpine (musl) ----
-FROM rust:1.98.1-alpine3.24 AS builder
+FROM rust:1.99.1-alpine3.24 AS builder
 RUN apk add --no-cache build-base musl-dev cmake perl clang clang22-libclang git
 WORKDIR /build
 ARG TARGETARCH

@@ -1,36 +1,41 @@
-use anyhow::Result;
-use clap::{ArgAction, Parser, ValueEnum};
-use reddit::{Config, MediaFormat, PostsMode, Sort, TimeFilter, UA_DEFAULT};
+use anyhow::{Result, bail};
+use chrono::NaiveDate;
+use clap::Parser;
+use reddit::{
+    Config, ConvertFormat, Cookies, MediaFormat, MediaReport, PostsMode, Selection, Size, Sort,
+    Summary, TimeFilter, TransformOptions,
+};
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "reddit",
     version,
-    about = "Reddit offline viewer: save subreddit posts and media as JSON",
-    long_about = "Archive subreddit or user listings as JSON and media. Defaults to \
-the first listing page (~25 posts), all gallery images, and no videos. Re-runs \
-merge posts and reuse cached media. Reddit may require browser-exported cookies.",
+    about = "Archive Reddit listings as JSON and media, with an offline viewer",
+    long_about = "Archive subreddit or user listings as JSON and media. By default a run \
+fetches the first listing page (~25 posts) and downloads images but not videos. \
+Re-runs merge posts and reuse media already on disk. Reddit usually requires cookies \
+exported from a signed-in browser.",
     after_help = "Examples:\n  \
 reddit pics --offline --cookies cookies.txt\n  \
 reddit pics rust --posts 0 --offline --cookies cookies.txt\n  \
 reddit gifs --formats gif --cookies cookies.txt"
 )]
 struct Cli {
-    /// One or more subreddits/users: name, r/name, u/name or a full reddit URL
-    #[arg(value_name = "SUBREDDIT_OR_URL", required = true, num_args = 1..)]
+    /// Subreddits or users: name, r/name, u/name or a Reddit URL
+    #[arg(value_name = "SUBREDDIT_OR_URL", required = true)]
     targets: Vec<String>,
 
-    /// Netscape cookies.txt path or 'k=v; k2=v2' string
-    /// (recommended: reddit rejects anonymous JSON requests; also unlocks private/NSFW)
-    #[arg(long)]
+    /// Netscape cookies.txt file, or an inline 'name=value; name2=value2' string
+    #[arg(long, value_name = "FILE|COOKIES")]
     cookies: Option<String>,
 
-    /// must match the browser the cookies were exported from
-    #[arg(long, default_value = UA_DEFAULT)]
-    user_agent: String,
+    /// User-Agent of the browser the cookies came from [default: Chrome 149]
+    #[arg(long)]
+    user_agent: Option<String>,
 
-    /// output directory (default: output/<r_|u_><name>, or $REDDIT_OUT_DIR)
+    /// Output root; each target is saved to <DIR>/<r_|u_><name>
     #[arg(
         long,
         default_value = "output",
@@ -39,24 +44,27 @@ struct Cli {
     )]
     out_dir: PathBuf,
 
-    /// paginate the listing; optional cap: --posts 50 (0 = everything)
+    /// Paginate the listing, optionally up to N posts (no value or 0: no limit)
     #[arg(long, num_args = 0..=1, default_missing_value = "0", value_name = "N")]
-    posts: Option<Option<u64>>,
+    posts: Option<u64>,
 
-    /// listing order [default: hot, or the order in each URL]
+    /// Listing order [default: hot, or the order in the URL]
     #[arg(long, value_enum, value_name = "ORDER")]
-    sort: Option<SortArg>,
+    sort: Option<Sort>,
 
-    /// time window for top/controversial [default: all]
+    /// Time window for top/controversial [default: all, or the window in the URL]
     #[arg(long, value_enum, value_name = "WINDOW")]
-    time: Option<TimeArg>,
+    time: Option<TimeFilter>,
 
-    /// also download reddit-hosted video files (images only by default)
-    #[arg(long, action = ArgAction::SetTrue)]
+    /// Only keep fetched posts created on or after this UTC day
+    #[arg(long, value_parser = parse_date, value_name = "YYYY-MM-DD")]
+    since: Option<NaiveDate>,
+
+    /// Also download videos
+    #[arg(long)]
     videos: bool,
 
-    /// only download these media formats (repeatable or comma-separated;
-    /// mp4/webm imply --videos)
+    /// Only download these formats (comma-separated or repeated)
     #[arg(
         long,
         value_enum,
@@ -64,335 +72,249 @@ struct Cli {
         ignore_case = true,
         value_name = "FORMAT"
     )]
-    formats: Vec<FormatArg>,
+    formats: Vec<MediaFormat>,
 
-    /// skip still images smaller than this: short side < W or long side < H
-    #[arg(long, value_parser = parse_size, value_name = "WxH")]
-    min_size: Option<(u32, u32)>,
-
-    /// downscale still images so neither side exceeds this box
-    #[arg(long, value_parser = parse_size, value_name = "WxH")]
-    max_size: Option<(u32, u32)>,
-
-    /// convert JPEG/PNG/BMP stills to this format (gif/webp are kept as-is)
-    #[arg(long, value_enum, ignore_case = true, value_name = "FORMAT")]
-    convert: Option<ConvertArg>,
-
-    /// JPEG quality for converted/resized images (1-100)
-    #[arg(
-        long,
-        default_value_t = 85,
-        value_parser = clap::value_parser!(u8).range(1..=100),
-        value_name = "N"
-    )]
-    quality: u8,
-
-    /// max images per gallery (0 = all)
+    /// Maximum images per gallery (0: all)
     #[arg(long, default_value_t = 0, value_name = "N")]
     gallery_images: usize,
 
-    /// only posts created on/after this date (YYYY-MM-DD)
-    #[arg(long, value_name = "DATE")]
-    since: Option<String>,
+    /// Skip stills whose short side is below W or long side below H
+    #[arg(long, value_name = "WxH")]
+    min_size: Option<Size>,
 
-    /// skip the subreddit icon and banner
-    #[arg(long, action = ArgAction::SetTrue)]
+    /// Downscale stills to fit within this box
+    #[arg(long, value_name = "WxH")]
+    max_size: Option<Size>,
+
+    /// Convert JPEG/PNG/BMP stills to this format (GIF/WebP are kept)
+    #[arg(long, value_enum, ignore_case = true, value_name = "FORMAT")]
+    convert: Option<ConvertFormat>,
+
+    /// JPEG quality for converted or resized stills
+    #[arg(long, default_value_t = 85, value_parser = clap::value_parser!(u8).range(1..=100), value_name = "1-100")]
+    quality: u8,
+
+    /// Skip the subreddit icon and banner
+    #[arg(long)]
     no_icon: bool,
 
-    /// skip the raw listing JSON dump
-    #[arg(long, action = ArgAction::SetTrue)]
+    /// Do not save the raw listing JSON
+    #[arg(long)]
     no_raw: bool,
 
-    /// skip media downloads entirely (JSON only)
-    #[arg(long, action = ArgAction::SetTrue)]
+    /// Save JSON only; download no media
+    #[arg(long)]
     no_downloads: bool,
 
-    /// generate self-contained index.html viewers (plus an archive hub)
-    #[arg(long, action = ArgAction::SetTrue)]
+    /// Write offline viewers and an archive hub (index.html)
+    #[arg(long)]
     offline: bool,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum FormatArg {
-    /// JPEG images (`jpeg` is accepted too)
-    #[value(alias = "jpeg")]
-    Jpg,
-    Png,
-    Gif,
-    Webp,
-    Bmp,
-    /// MP4 video (implies --videos)
-    Mp4,
-    /// WebM video (implies --videos)
-    Webm,
+fn parse_date(s: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| format!("expected YYYY-MM-DD: {e}"))
 }
 
-impl From<FormatArg> for MediaFormat {
-    fn from(f: FormatArg) -> Self {
-        match f {
-            FormatArg::Jpg => MediaFormat::Jpg,
-            FormatArg::Png => MediaFormat::Png,
-            FormatArg::Gif => MediaFormat::Gif,
-            FormatArg::Webp => MediaFormat::Webp,
-            FormatArg::Bmp => MediaFormat::Bmp,
-            FormatArg::Mp4 => MediaFormat::Mp4,
-            FormatArg::Webm => MediaFormat::Webm,
-        }
-    }
-}
-
-/// Conversion targets; GIF/WebP are excluded because they may be animated.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum ConvertArg {
-    /// JPEG (`jpeg` is accepted too; transparency is flattened onto white)
-    #[value(alias = "jpeg")]
-    Jpg,
-    Png,
-}
-
-impl From<ConvertArg> for MediaFormat {
-    fn from(c: ConvertArg) -> Self {
-        match c {
-            ConvertArg::Jpg => MediaFormat::Jpg,
-            ConvertArg::Png => MediaFormat::Png,
-        }
-    }
-}
-
-/// `WxH` with both sides greater than zero.
-fn parse_size(s: &str) -> Result<(u32, u32), String> {
-    let bad = || format!("invalid size '{s}': expected WxH, e.g. 768x1024");
-    let split = s.find(['x', 'X']).ok_or_else(bad)?;
-    let (w, h) = (&s[..split], &s[split + 1..]);
-    let w: u32 = w.trim().parse().map_err(|_| bad())?;
-    let h: u32 = h.trim().parse().map_err(|_| bad())?;
-    if w == 0 || h == 0 {
-        return Err(format!(
-            "invalid size '{s}': sides must be greater than zero"
-        ));
-    }
-    Ok((w, h))
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum SortArg {
-    Hot,
-    New,
-    Top,
-    Rising,
-    Controversial,
-}
-
-impl From<SortArg> for Sort {
-    fn from(s: SortArg) -> Self {
-        match s {
-            SortArg::Hot => Sort::Hot,
-            SortArg::New => Sort::New,
-            SortArg::Top => Sort::Top,
-            SortArg::Rising => Sort::Rising,
-            SortArg::Controversial => Sort::Controversial,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-enum TimeArg {
-    Hour,
-    Day,
-    Week,
-    Month,
-    Year,
-    All,
-}
-
-impl From<TimeArg> for TimeFilter {
-    fn from(t: TimeArg) -> Self {
-        match t {
-            TimeArg::Hour => TimeFilter::Hour,
-            TimeArg::Day => TimeFilter::Day,
-            TimeArg::Week => TimeFilter::Week,
-            TimeArg::Month => TimeFilter::Month,
-            TimeArg::Year => TimeFilter::Year,
-            TimeArg::All => TimeFilter::All,
-        }
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    // Parse every target up front: a typo should fail before any network call.
-    let parsed: Vec<reddit::ParsedTarget> = cli
-        .targets
-        .iter()
-        .map(|raw| reddit::parse_target(raw))
-        .collect::<Result<_>>()?;
-
-    let posts = match cli.posts {
-        Some(Some(n)) => PostsMode::All(n),
-        Some(None) => PostsMode::All(0),
-        None => PostsMode::Snapshot,
-    };
-
-    // `--formats jpeg` and `--formats jpg` are the same request.
-    let mut formats: Vec<MediaFormat> =
-        cli.formats.iter().copied().map(MediaFormat::from).collect();
-    formats.sort();
-    formats.dedup();
-
-    let multiple = parsed.len() > 1;
-    let mut summaries = Vec::with_capacity(parsed.len());
-    let mut failures = Vec::new();
-
-    for (i, parsed) in parsed.into_iter().enumerate() {
-        // explicit flags win over hints embedded in the URL
-        let sort = cli
-            .sort
-            .map(Sort::from)
-            .or(parsed.sort)
-            .unwrap_or(Sort::Hot);
-        let time = cli
-            .time
-            .map(TimeFilter::from)
-            .or(parsed.time)
-            .unwrap_or(TimeFilter::All);
-
-        if multiple {
-            println!(
-                "\n=== {} ({}/{}) ===",
-                parsed.target.display(),
-                i + 1,
-                cli.targets.len()
-            );
-        }
-
-        let cfg = Config {
-            target: parsed.target,
-            cookies: cli.cookies.clone(),
-            user_agent: cli.user_agent.clone(),
-            out_dir: cli.out_dir.clone(),
-            posts,
-            sort,
-            time,
-            videos: cli.videos,
-            formats: formats.clone(),
-            min_size: cli.min_size,
-            max_size: cli.max_size,
-            convert: cli.convert.map(MediaFormat::from),
-            quality: cli.quality,
-            gallery_images: cli.gallery_images,
-            since: cli.since.clone(),
-            skip_icon: cli.no_icon,
-            no_raw: cli.no_raw,
-            no_downloads: cli.no_downloads,
-            offline: cli.offline,
-            ..Config::default()
-        };
-
-        let label = cfg.target.display();
-        match reddit::run(cfg).await {
-            Ok(summary) => summaries.push(summary),
-            Err(e) => failures.push(format!("{label}: {e}")),
+impl Cli {
+    fn posts_mode(&self) -> PostsMode {
+        match self.posts.map(NonZeroU64::new) {
+            None => PostsMode::FirstPage,
+            Some(None) => PostsMode::All,
+            Some(Some(n)) => PostsMode::Limit(n),
         }
     }
 
-    if !failures.is_empty() {
-        for f in &failures {
-            eprintln!("error: {f}");
-        }
-        anyhow::bail!(
-            "{} of {} archive(s) failed",
-            failures.len(),
-            cli.targets.len()
-        );
-    }
+    /// One config per target; explicit flags win over URL hints.
+    fn configs(&self) -> Result<Vec<Config>> {
+        // Fail on typos and unreadable cookies before any network request.
+        let cookies = self
+            .cookies
+            .as_deref()
+            .map(Cookies::from_arg)
+            .transpose()?
+            .unwrap_or_default();
+        let mut formats = self.formats.clone();
+        formats.sort();
+        formats.dedup();
 
-    let total = |f: fn(&reddit::Summary) -> usize| summaries.iter().map(f).sum::<usize>();
-    let (posts, new, downloaded) = (
-        total(|s| s.posts),
-        total(|s| s.posts_new),
-        total(|s| s.media_downloaded),
-    );
-    let mut notes = Vec::new();
-    for (count, label) in [
-        (total(|s| s.media_converted), "converted"),
-        (total(|s| s.media_resized), "resized"),
-        (total(|s| s.media_skipped), "skipped small"),
-    ] {
-        if count > 0 {
-            notes.push(format!("{count} {label}"));
-        }
+        self.targets
+            .iter()
+            .map(|raw| {
+                let parsed = reddit::parse_target(raw)?;
+                let mut config = Config::new(parsed.target);
+                config.cookies = cookies.clone();
+                config.user_agent = self.user_agent.clone();
+                config.out_dir = self.out_dir.clone();
+                config.posts = self.posts_mode();
+                config.sort = self.sort.or(parsed.sort).unwrap_or_default();
+                config.time = self.time.or(parsed.time).unwrap_or_default();
+                config.since = self.since;
+                config.media = Selection {
+                    videos: self.videos,
+                    formats: formats.clone(),
+                    gallery_limit: (self.gallery_images > 0).then_some(self.gallery_images),
+                    subreddit_art: !self.no_icon,
+                    min_size: self.min_size,
+                };
+                config.transforms = TransformOptions {
+                    max_size: self.max_size,
+                    convert: self.convert,
+                    quality: self.quality,
+                };
+                config.save_raw = !self.no_raw;
+                config.download = !self.no_downloads;
+                config.offline = self.offline;
+                Ok(config)
+            })
+            .collect()
     }
+}
+
+fn print_summary(summaries: &[Summary]) {
+    let posts: usize = summaries.iter().map(|s| s.posts).sum();
+    let new: usize = summaries.iter().map(|s| s.posts_new).sum();
+    let mut media = MediaReport::default();
+    for summary in summaries {
+        media += summary.media;
+    }
+    let notes: Vec<String> = [
+        (media.converted, "converted"),
+        (media.resized, "resized"),
+        (media.skipped, "skipped as too small"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect();
     let notes = if notes.is_empty() {
         String::new()
     } else {
         format!(" [{}]", notes.join(", "))
     };
     println!(
-        "\ndone — {posts} posts ({new} new) | media: {downloaded} downloaded, {} cached, {} failed{notes}",
-        total(|s| s.media_cached),
-        total(|s| s.media_failed),
+        "\ndone: {posts} posts ({new} new) | media: {} downloaded, {} cached, {} failed{notes}",
+        media.downloaded, media.cached, media.failed
     );
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let configs = cli.configs()?;
+    let count = configs.len();
+    let mut summaries = Vec::with_capacity(count);
+    let mut failures = Vec::new();
+
+    for (i, config) in configs.iter().enumerate() {
+        if count > 1 {
+            println!("\n=== {} ({}/{count}) ===", config.target, i + 1);
+        }
+        match reddit::run(config).await {
+            Ok(summary) => summaries.push(summary),
+            Err(e) => failures.push(format!("{}: {e:#}", config.target)),
+        }
+    }
+
+    print_summary(&summaries);
+    for failure in &failures {
+        eprintln!("error: {failure}");
+    }
+    if !failures.is_empty() {
+        bail!("{} of {count} archive(s) failed", failures.len());
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("reddit").chain(args.iter().copied())).unwrap()
+    }
 
     #[test]
     fn cli_definition_is_consistent() {
-        use clap::CommandFactory;
         Cli::command().debug_assert();
     }
 
     #[test]
-    fn sizes_require_two_positive_dimensions() {
-        assert_eq!(parse_size("768x1024").unwrap(), (768, 1024));
-        assert_eq!(parse_size(" 768X1024 ").unwrap(), (768, 1024));
-        for value in [
-            "",
-            "768",
-            "0x1024",
-            "768x0",
-            "1x2x3",
-            "-1x2",
-            "4294967296x1",
-        ] {
-            assert!(parse_size(value).is_err(), "{value}");
-        }
-    }
-
-    #[test]
-    fn optional_post_caps_and_multiple_targets() {
-        let cli = Cli::try_parse_from(["reddit", "pics", "rust", "--posts", "--offline"]).unwrap();
-        assert_eq!(cli.targets, ["pics", "rust"]);
-        assert_eq!(cli.posts, Some(Some(0)));
-        assert!(cli.offline);
+    fn posts_flag_modes() {
+        assert_eq!(parse(&["pics"]).posts_mode(), PostsMode::FirstPage);
+        assert_eq!(parse(&["pics", "--posts"]).posts_mode(), PostsMode::All);
         assert_eq!(
-            Cli::try_parse_from(["reddit", "pics", "--posts", "5"])
-                .unwrap()
-                .posts,
-            Some(Some(5))
+            parse(&["pics", "--posts", "0"]).posts_mode(),
+            PostsMode::All
         );
+        assert_eq!(
+            parse(&["pics", "--posts", "5"]).posts_mode(),
+            PostsMode::Limit(NonZeroU64::new(5).unwrap())
+        );
+        // `--posts` without a value must not swallow the next target
+        let cli = parse(&["pics", "--posts", "--offline", "rust"]);
+        assert_eq!(cli.targets, ["pics", "rust"]);
+        assert!(cli.offline);
     }
 
     #[test]
-    fn format_aliases_and_quality_validation() {
-        let cli = Cli::try_parse_from([
-            "reddit",
+    fn formats_aliases_sizes_and_validation() {
+        let cli = parse(&[
             "pics",
             "--formats",
-            "jpeg,png",
+            "jpeg,PNG",
+            "--formats",
+            "jpg",
             "--convert",
             "JPEG",
-        ])
-        .unwrap();
-        assert_eq!(cli.formats, [FormatArg::Jpg, FormatArg::Png]);
-        assert_eq!(cli.convert, Some(ConvertArg::Jpg));
-        for quality in ["0", "101"] {
-            assert!(Cli::try_parse_from(["reddit", "pics", "--quality", quality]).is_err());
+            "--min-size",
+            "768x1024",
+        ]);
+        assert_eq!(
+            cli.formats,
+            [MediaFormat::Jpg, MediaFormat::Png, MediaFormat::Jpg]
+        );
+        assert_eq!(cli.convert, Some(ConvertFormat::Jpg));
+        assert_eq!(cli.min_size, Size::new(768, 1024));
+        let config = &cli.configs().unwrap()[0];
+        assert_eq!(config.media.formats, [MediaFormat::Jpg, MediaFormat::Png]);
+
+        for bad in [
+            &["pics", "--quality", "0"][..],
+            &["pics", "--quality", "101"],
+            &["pics", "--max-size", "0x10"],
+            &["pics", "--convert", "gif"],
+            &["pics", "--since", "01-08-2026"],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("reddit").chain(bad.iter().copied())).is_err(),
+                "{bad:?}"
+            );
         }
+    }
+
+    #[test]
+    fn flags_override_url_hints() {
+        let cli = parse(&[
+            "https://www.reddit.com/r/rust/top/?t=week",
+            "u/spez",
+            "--time",
+            "day",
+        ]);
+        let configs = cli.configs().unwrap();
+        assert_eq!(
+            (configs[0].sort, configs[0].time),
+            (Sort::Top, TimeFilter::Day)
+        );
+        assert_eq!(
+            (configs[1].sort, configs[1].time),
+            (Sort::Hot, TimeFilter::Day)
+        );
+        assert!(parse(&["r/bad name"]).configs().is_err());
+        assert!(
+            parse(&["pics", "--cookies", "missing-cookies.txt"])
+                .configs()
+                .is_err()
+        );
     }
 }

@@ -1,39 +1,32 @@
-//! Minimal programmatic usage of the `reddit` crate.
-//!
-//! This mirrors the CLI: build a [`Config`](reddit::Config), call
-//! [`reddit::run`], and get a [`Summary`](reddit::Summary) back.
-//!
-//! Run it:
+//! Archive a whole listing with the library API and write the offline viewer.
 //!
 //! ```sh
 //! cargo run --release --example archive -- rust
-//! cargo run --release --example archive -- funny /path/to/cookies.txt
+//! cargo run --release --example archive -- 'https://www.reddit.com/r/pics/top/?t=week' cookies.txt
 //! ```
 
-use reddit::{Config, PostsMode, Sort};
-use std::env;
+use reddit::{Config, Cookies, PostsMode, Sort};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let input = args.first().map(String::as_str).unwrap_or("rust");
-    let parsed = reddit::parse_target(input)?;
+    let mut args = std::env::args().skip(1);
+    let parsed = reddit::parse_target(&args.next().unwrap_or_else(|| "rust".into()))?;
 
-    let mut cfg = Config {
-        target: parsed.target,
-        sort: parsed.sort.unwrap_or(Sort::New),
-        posts: PostsMode::All(0), // paginate the whole listing
-        offline: true,            // also write index.html
-        ..Config::default()
-    };
-    if let Some(path) = args.get(1) {
-        cfg.cookies = Some(path.clone()); // Netscape cookies.txt or 'k=v; k2=v2'
+    let mut config = Config::new(parsed.target);
+    config.sort = parsed.sort.unwrap_or(Sort::New);
+    config.time = parsed.time.unwrap_or_default();
+    config.posts = PostsMode::All;
+    config.offline = true;
+    if let Some(cookies) = args.next() {
+        // A Netscape cookies.txt path or an inline 'name=value; …' string.
+        config.cookies = Cookies::from_arg(&cookies)?;
     }
 
-    let summary = reddit::run(cfg).await?;
+    let summary = reddit::run(&config).await?;
+    let media = summary.media;
     println!(
-        "{} posts | media: {} downloaded, {} cached, {} failed",
-        summary.posts, summary.media_downloaded, summary.media_cached, summary.media_failed
+        "{} posts ({} new) | media: {} downloaded, {} cached, {} failed",
+        summary.posts, summary.posts_new, media.downloaded, media.cached, media.failed
     );
     Ok(())
 }
